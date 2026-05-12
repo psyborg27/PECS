@@ -1,192 +1,422 @@
-
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<title>PECS Architecture Flow</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PECS Interactive Architecture Flowcharts</title>
 <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
 <style>
 body {
+    margin: 0;
     font-family: Arial, sans-serif;
-    margin: 20px;
+    background: #0f1115;
+    color: #e5e7eb;
 }
-.container {
-    width: 100%;
-    overflow: auto;
+
+header {
+    padding: 20px;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
 }
+
 h1 {
-    margin-bottom: 10px;
+    margin: 0;
+    font-size: 28px;
 }
-.legend {
+
+.subtitle {
+    margin-top: 8px;
+    color: #9ca3af;
+}
+
+.tabs {
+    display: flex;
+    gap: 10px;
+    padding: 15px 20px;
+    background: #111827;
+    border-bottom: 1px solid #30363d;
+    flex-wrap: wrap;
+}
+
+.tab-button {
+    background: #1f2937;
+    color: #e5e7eb;
+    border: 1px solid #374151;
+    padding: 10px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.tab-button:hover {
+    background: #374151;
+}
+
+.tab-button.active {
+    background: #2563eb;
+    border-color: #2563eb;
+}
+
+.content {
+    padding: 20px;
+}
+
+.panel {
+    display: none;
+}
+
+.panel.active {
+    display: block;
+}
+
+.card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 20px;
     margin-bottom: 20px;
+}
+
+.card h2 {
+    margin-top: 0;
+}
+
+.note {
+    background: #1f2937;
+    border-left: 4px solid #2563eb;
+    padding: 12px;
+    margin-top: 15px;
+    color: #d1d5db;
+}
+
+.mermaid {
+    overflow-x: auto;
+}
+
+ul {
+    line-height: 1.7;
+}
+
+code {
+    background: #111827;
+    padding: 2px 6px;
+    border-radius: 4px;
 }
 </style>
 </head>
 <body>
 
-<h1>PECS — Persistent Engineering Continuity System</h1>
+<header>
+    <h1>PECS Interactive Architecture Flowcharts</h1>
+    <div class="subtitle">
+        Persistent Engineering Continuity System — Final Consolidated Architecture
+    </div>
+</header>
 
-<div class="legend">
-<b>Flow Legend</b>
-<ul>
-<li>Blue = Import / Discovery</li>
-<li>Green = Reconstruction</li>
-<li>Orange = Continuity</li>
-<li>Red = Drift / Consolidation</li>
-<li>Purple = Runtime / Retrieval</li>
-</ul>
+<div class="tabs">
+    <button class="tab-button active" onclick="showMode('pro', this)">PECS-PRO</button>
+    <button class="tab-button" onclick="showMode('lite', this)">PECS-LITE</button>
 </div>
 
-<div class="container">
-<pre class="mermaid">
+<div class="tabs" id="pro-tabs">
+    <button class="tab-button active subtab-pro" onclick="showPanel('pro-main', this)">PRO Main Flow</button>
+    <button class="tab-button subtab-pro" onclick="showPanel('pro-authority', this)">Continuity Authority</button>
+    <button class="tab-button subtab-pro" onclick="showPanel('comparison', this)">PRO vs LITE</button>
+</div>
 
+<div class="tabs" id="lite-tabs" style="display:none;">
+    <button class="tab-button active subtab-lite" onclick="showPanel('lite-main', this)">LITE Main Flow</button>
+    <button class="tab-button subtab-lite" onclick="showPanel('lite-small', this)">Small Model Flow</button>
+</div>
+
+<div class="content">
+
+    <div id="pro-main" class="panel active">
+        <div class="card">
+            <h2>PECS-PRO — Final Runtime Architecture</h2>
+
+            <div class="mermaid">
 flowchart TD
 
-A["RegistryBootstrapEngine
-pecs_registry_bootstrap_engine.py
-DirectoryBootstrap.create()
-RegistrySchema.initialize()"]
+A[User Workspace] --> B[workspace_scanner.py]
+A --> C[AI Chat Dump]
 
-B["FirstRunConsolidator
-pecs_first_run_context_consolidator.py
-ChatDiscovery.discover()
-TranscriptImporter.import_all()"]
-
-C["CopilotImportEngine
-pecs_copilot_chat_importer.py
-discover()
-normalize_chat()"]
-
-D["ObjectReconstructionEngine
-pecs_object_reconstruction_engine.py
-reconstruct()
-persist()"]
-
-E["SymbolIndexEngine
-pecs_symbol_indexing_engine.py
-build()
-index_file()"]
-
-F["RelationGraphEngine
-pecs_object_relation_graph_engine.py
-build_graph()
-calculate_relation_pressure()"]
-
-G["ObjectGroupingEngine
-pecs_object_grouping_engine.py
-build_groups()
-persist()"]
-
-H["CanonicalLocalityConsolidator
-pecs_canonical_locality_consolidator.py
-consolidate()
-reinforce()"]
-
-I["ArchitecturalDriftDetector
-pecs_architectural_drift_detector.py
-drift_score()
-consolidation_pressure()"]
-
-J["ContextCompressionEngine
-pecs_context_compression_engine.py
-build()
-compress()"]
-
-K["ContinuityRetrievalEngine
-pecs_continuity_retrieval_engine.py
-query()
-project()"]
-
-L["CrossChatMemoryBridge
-pecs_cross_chat_memory_bridge.py
-build()
-persist()"]
-
-M["VSCodeWorkspaceWatcher
-pecs_vscode_workspace_watcher.py
-record_change()
-reinforce_from_change()"]
-
-N["LiveContinuityDaemon
-pecs_live_continuity_daemon.py
-refresh()
-run_forever()"]
-
-O["ContinueRuntimeBridge
-pecs_continue_runtime_bridge.py
-inject_context()
-budget_projection()"]
-
-P["ConvergenceAdvisor
-pecs_convergence_advisor.py
-suggest_convergence()
-avoid_scattering()"]
-
-Q["PromptRouter
-pecs_prompt_router.py
-route()
-select_objects()"]
-
-R["TokenBudgetManager
-pecs_token_budget_manager.py
-adaptive_compression()
-active_object_priority()"]
-
-A --> B
-A --> E
-
-B --> C
+B --> D[Object Reconstruction Layer]
 C --> D
 
-D --> F
-D --> G
-D --> H
+D --> E[object_model.py]
+D --> F[registry.py]
 
-E --> F
-E --> H
+F --> G[(objects.db)]
 
-F --> G
+D --> H[object_engine.py]
+H --> I[retrieval_engine.py]
 
-G --> H
+I --> J[Canonical Locality Reconstruction]
+I --> K[Duplicate Evolution Mapping]
+I --> L[Continuity Confidence Weighting]
 
-H --> I
+J --> M[final_runtime_core.py]
+K --> M
+L --> M
 
-I --> P
+M --> N[runtime_cache.py]
+M --> O[pecs_runtime_overlay_manager.py]
+M --> P[pecs_incremental_update_engine.py]
 
-H --> J
+P --> Q[Incremental File Tracking]
 
-J --> K
+M --> R[continue_adapter.py]
 
-K --> O
+R --> S[.continue/rules/pecs_runtime.md]
 
-L --> K
+S --> T[Copilot / Continue / Claude]
 
+T --> U[Continuity-Constrained Generation]
+
+U --> V[Workspace Updates]
+
+V --> B
+            </div>
+
+            <div class="note">
+                PECS-PRO focuses on long-running continuity preservation, incremental evolution, duplicate awareness, and runtime continuity reconstruction.
+            </div>
+        </div>
+    </div>
+
+    <div id="pro-authority" class="panel">
+        <div class="card">
+            <h2>Continuity Authority Hierarchy</h2>
+
+            <div class="mermaid">
+flowchart TD
+
+A[Live Imports]
+B[Live Runtime Wiring]
+C[Live Symbol References]
+D[Actual Dependency Chains]
+
+A --> E[LEVEL 1\nLIVE STRUCTURAL AUTHORITY]
+B --> E
+C --> E
+D --> E
+
+F[Current Workspace State] --> G[LEVEL 2\nCURRENT LOCALITY STATE]
+
+H[Current Session Context] --> I[LEVEL 3\nACTIVE ENGINEERING CONTEXT]
+
+J[Historical AI Dump]
+K[Old Iterations]
+L[Historical Architecture]
+
+J --> M[LEVEL 4\nHISTORICAL CONTINUITY MEMORY]
+K --> M
+L --> M
+
+E --> N[Continuity Reconstruction]
+G --> N
+I --> N
 M --> N
 
-N --> J
+N --> O[Confidence Weighting]
 
-N --> K
+O --> P[Canonical Locality]
+O --> Q[Duplicate Mapping]
+O --> R[Regression Detection]
+            </div>
 
-Q --> K
+            <div class="note">
+                Historical AI memory is treated as probabilistic continuity telemetry — NOT authoritative structural truth.
+            </div>
+        </div>
+    </div>
 
-R --> J
+    <div id="lite-main" class="panel">
+        <div class="card">
+            <h2>PECS-LITE — Lightweight Runtime Architecture</h2>
 
-P --> O
+            <div class="mermaid">
+flowchart TD
 
-O -->|"Injected into Continue"| ContinueLLM["Continue / Copilot LLM Session"]
+A[User Workspace] --> B[PECS-LITE Runtime]
+A --> C[Historical AI Context]
 
-</pre>
+B --> D[pecs_lite_runtime_core.py]
+
+D --> E[pecs_lite_registry.py]
+D --> F[pecs_lite_object_model.py]
+D --> G[pecs_lite_runtime_cache.py]
+
+E --> H[(Compact Continuity State)]
+
+D --> I[Compact Continuity Reconstruction]
+D --> J[Canonical Locality Hints]
+D --> K[Duplicate Awareness]
+
+I --> L[pecs_lite_continue_adapter.py]
+J --> L
+K --> L
+
+L --> M[Compact Runtime Export]
+
+M --> N[Small Context Models]
+
+N --> O[Continuity-Constrained Generation]
+
+O --> P[Workspace Updates]
+
+P --> B
+            </div>
+
+            <div class="note">
+                PECS-LITE is intentionally minimal and optimized for local/small-context inference.
+            </div>
+        </div>
+    </div>
+
+    <div id="lite-small" class="panel">
+        <div class="card">
+            <h2>PECS-LITE — Small Model Optimization Flow</h2>
+
+            <div class="mermaid">
+flowchart LR
+
+A[Large Workspace Entropy]
+
+A --> B[PECS-LITE Compact Retrieval]
+
+B --> C[Canonical Locality Injection]
+B --> D[Duplicate Awareness]
+B --> E[Compact Continuity Export]
+
+C --> F[Reduced Prompt Size]
+D --> F
+E --> F
+
+F --> G[8k / 16k / 32k Models]
+
+G --> H[Reduced Blind Rewrites]
+G --> I[Reduced Duplicate Creation]
+G --> J[Improved Locality Stability]
+
+H --> K[Longer Sustainable Sessions]
+I --> K
+J --> K
+            </div>
+
+            <div class="note">
+                PECS-LITE attempts to reduce continuity collapse for constrained-context local models.
+            </div>
+        </div>
+    </div>
+
+    <div id="comparison" class="panel">
+        <div class="card">
+            <h2>PECS-PRO vs PECS-LITE</h2>
+
+            <div class="mermaid">
+flowchart LR
+
+A[PECS Shared Principles]
+
+A --> B[Continuity Reconstruction]
+A --> C[Canonical Locality]
+A --> D[Duplicate Awareness]
+A --> E[Entropy Reduction]
+
+B --> F[PECS-PRO]
+C --> F
+D --> F
+E --> F
+
+B --> G[PECS-LITE]
+C --> G
+D --> G
+E --> G
+
+F --> H[Large Projects]
+F --> I[Long Runtime Sessions]
+F --> J[Incremental Updates]
+F --> K[Continuity Archaeology]
+
+G --> L[Local Models]
+G --> M[Small Contexts]
+G --> N[Compact Retrieval]
+G --> O[Lightweight Runtime]
+            </div>
+
+            <div class="note">
+                Both systems share the same continuity philosophy but target different runtime complexity levels.
+            </div>
+
+            <ul>
+                <li><strong>PECS-PRO:</strong> larger workspaces, richer continuity reconstruction, incremental persistence</li>
+                <li><strong>PECS-LITE:</strong> constrained inference, compact continuity routing, low overhead</li>
+                <li><strong>Both:</strong> deterministic continuity infrastructure, not autonomous engineering intelligence</li>
+            </ul>
+        </div>
+    </div>
+
 </div>
 
 <script>
 mermaid.initialize({
     startOnLoad: true,
-    securityLevel: 'loose',
-    flowchart: {
-        useMaxWidth: true,
-        htmlLabels: true
-    }
+    theme: 'dark',
+    securityLevel: 'loose'
 });
+
+function showPanel(id, btn) {
+    document.querySelectorAll('.panel').forEach(panel => {
+        panel.classList.remove('active');
+    });
+
+    const isPro = id.startsWith('pro') || id === 'comparison';
+
+    if (isPro) {
+        document.querySelectorAll('.subtab-pro').forEach(button => {
+            button.classList.remove('active');
+        });
+    } else {
+        document.querySelectorAll('.subtab-lite').forEach(button => {
+            button.classList.remove('active');
+        });
+    }
+
+    document.getElementById(id).classList.add('active');
+    btn.classList.add('active');
+}
+
+function showMode(mode, btn) {
+    document.querySelectorAll('.tabs:first-of-type .tab-button').forEach(button => {
+        button.classList.remove('active');
+    });
+
+    btn.classList.add('active');
+
+    if (mode === 'pro') {
+        document.getElementById('pro-tabs').style.display = 'flex';
+        document.getElementById('lite-tabs').style.display = 'none';
+
+        document.querySelectorAll('.panel').forEach(panel => {
+            panel.classList.remove('active');
+        });
+
+        document.getElementById('pro-main').classList.add('active');
+    }
+
+    if (mode === 'lite') {
+        document.getElementById('pro-tabs').style.display = 'none';
+        document.getElementById('lite-tabs').style.display = 'flex';
+
+        document.querySelectorAll('.panel').forEach(panel => {
+            panel.classList.remove('active');
+        });
+
+        document.getElementById('lite-main').classList.add('active');
+    }
+}
 </script>
 
 </body>

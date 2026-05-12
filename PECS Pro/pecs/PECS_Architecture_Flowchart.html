@@ -1,0 +1,193 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PECS Architecture Flow</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    margin: 20px;
+}
+.container {
+    width: 100%;
+    overflow: auto;
+}
+h1 {
+    margin-bottom: 10px;
+}
+.legend {
+    margin-bottom: 20px;
+}
+</style>
+</head>
+<body>
+
+<h1>PECS — Persistent Engineering Continuity System</h1>
+
+<div class="legend">
+<b>Flow Legend</b>
+<ul>
+<li>Blue = Import / Discovery</li>
+<li>Green = Reconstruction</li>
+<li>Orange = Continuity</li>
+<li>Red = Drift / Consolidation</li>
+<li>Purple = Runtime / Retrieval</li>
+</ul>
+</div>
+
+<div class="container">
+<pre class="mermaid">
+
+flowchart TD
+
+A["RegistryBootstrapEngine
+pecs_registry_bootstrap_engine.py
+DirectoryBootstrap.create()
+RegistrySchema.initialize()"]
+
+B["FirstRunConsolidator
+pecs_first_run_context_consolidator.py
+ChatDiscovery.discover()
+TranscriptImporter.import_all()"]
+
+C["CopilotImportEngine
+pecs_copilot_chat_importer.py
+discover()
+normalize_chat()"]
+
+D["ObjectReconstructionEngine
+pecs_object_reconstruction_engine.py
+reconstruct()
+persist()"]
+
+E["SymbolIndexEngine
+pecs_symbol_indexing_engine.py
+build()
+index_file()"]
+
+F["RelationGraphEngine
+pecs_object_relation_graph_engine.py
+build_graph()
+calculate_relation_pressure()"]
+
+G["ObjectGroupingEngine
+pecs_object_grouping_engine.py
+build_groups()
+persist()"]
+
+H["CanonicalLocalityConsolidator
+pecs_canonical_locality_consolidator.py
+consolidate()
+reinforce()"]
+
+I["ArchitecturalDriftDetector
+pecs_architectural_drift_detector.py
+drift_score()
+consolidation_pressure()"]
+
+J["ContextCompressionEngine
+pecs_context_compression_engine.py
+build()
+compress()"]
+
+K["ContinuityRetrievalEngine
+pecs_continuity_retrieval_engine.py
+query()
+project()"]
+
+L["CrossChatMemoryBridge
+pecs_cross_chat_memory_bridge.py
+build()
+persist()"]
+
+M["VSCodeWorkspaceWatcher
+pecs_vscode_workspace_watcher.py
+record_change()
+reinforce_from_change()"]
+
+N["LiveContinuityDaemon
+pecs_live_continuity_daemon.py
+refresh()
+run_forever()"]
+
+O["ContinueRuntimeBridge
+pecs_continue_runtime_bridge.py
+inject_context()
+budget_projection()"]
+
+P["ConvergenceAdvisor
+pecs_convergence_advisor.py
+suggest_convergence()
+avoid_scattering()"]
+
+Q["PromptRouter
+pecs_prompt_router.py
+route()
+select_objects()"]
+
+R["TokenBudgetManager
+pecs_token_budget_manager.py
+adaptive_compression()
+active_object_priority()"]
+
+A --> B
+A --> E
+
+B --> C
+C --> D
+
+D --> F
+D --> G
+D --> H
+
+E --> F
+E --> H
+
+F --> G
+
+G --> H
+
+H --> I
+
+I --> P
+
+H --> J
+
+J --> K
+
+K --> O
+
+L --> K
+
+M --> N
+
+N --> J
+
+N --> K
+
+Q --> K
+
+R --> J
+
+P --> O
+
+O -->|"Injected into Continue"| ContinueLLM["Continue / Copilot LLM Session"]
+
+</pre>
+</div>
+
+<script>
+mermaid.initialize({
+    startOnLoad: true,
+    securityLevel: 'loose',
+    flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true
+    }
+});
+</script>
+
+</body>
+</html>

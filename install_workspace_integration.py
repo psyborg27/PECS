@@ -283,12 +283,12 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
         "type": "shell",
         "command": (
             'bash -lc \'cd "${workspaceFolder}" '
-            '&& python3 .pecs/tools/append_ai_chat_history.py "${{workspaceFolder}}" '
-            '--source "${{input:pecsChatSource}}" --message "${{input:pecsChatMessage}}"\''
+            '&& python3 .pecs/tools/append_ai_chat_history.py "${workspaceFolder}" '
+            '--source "${input:pecsChatSource}" --message "${input:pecsChatMessage}"\''
         ),
         "windows": {
             "command": (
-                'cd "${workspaceFolder}" && .\\pecs\\tools\\append_ai_chat_history.cmd "${{workspaceFolder}}" "${{input:pecsChatSource}}" "${{input:pecsChatMessage}}"'
+                'cd "${workspaceFolder}" && .\\pecs\\tools\\append_ai_chat_history.cmd "${workspaceFolder}" "${input:pecsChatSource}" "${input:pecsChatMessage}"'
             )
         },
     }
@@ -298,11 +298,11 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
         "type": "shell",
         "command": (
             'bash -lc \'cd "${workspaceFolder}" '
-            '&& bash .pecs/tools/update_ai_chat_history.sh "${{workspaceFolder}}" "${{input:pecsChatSource}}" "${{input:pecsChatMessage}}"\''
+            '&& bash .pecs/tools/update_ai_chat_history.sh "${workspaceFolder}" "${input:pecsChatSource}" "${input:pecsChatMessage}"\''
         ),
         "windows": {
             "command": (
-                'cd "${workspaceFolder}" && .\\pecs\\tools\\update_ai_chat_history.cmd "${{workspaceFolder}}" "${{input:pecsChatSource}}" "${{input:pecsChatMessage}}"'
+                'cd "${workspaceFolder}" && .\\pecs\\tools\\update_ai_chat_history.cmd "${workspaceFolder}" "${input:pecsChatSource}" "${input:pecsChatMessage}"'
             )
         },
     }

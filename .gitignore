@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.egg-info/
+.pecs_workspaces.json
 dist/
 build/
 .venv/
@@ -20,10 +21,10 @@ __pycache__/
 .pecs/compact_bundle.json
 .pecs/locality_index.json
 .pecs/topology_compact.json
-
 .continue/
 .github/
 .vscode/
 .pecs/ai_chat_history.json
 .pecs/backups/
 *.egg-info/
+.pecs_workspaces.json

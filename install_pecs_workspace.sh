@@ -1,17 +1,73 @@
 #!/usr/bin/env bash
-echo "Workspace integration installed."
-echo "Run task 'PECS: Start Daemon' in VS Code, or run:"
-echo "PECS_PRO_REPO=\"$SCRIPT_DIR\" \"$SCRIPT_DIR/launch_pecs_daemon.sh\" \"$WORKSPACE_ROOT\""
-
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <workspace-root>"
-  exit 1
-fi
-
-WORKSPACE_ROOT="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="${1:-}"
+
+function error_exit() {
+  echo "ERROR: $1" >&2
+  echo "Copy the full error output, include OS/version, branch name, and report the issue on GitHub." >&2
+  exit 1
+}
+
+function prompt_workspace_root() {
+  while true; do
+    if [[ -z "$WORKSPACE_ROOT" ]]; then
+      read -r -p "Enter the target workspace root path: " WORKSPACE_ROOT
+    fi
+
+    if [[ -z "$WORKSPACE_ROOT" ]]; then
+      echo "Workspace path is required." >&2
+      continue
+    fi
+
+    if [[ ! -d "$WORKSPACE_ROOT" ]]; then
+      echo "Workspace path does not exist: $WORKSPACE_ROOT" >&2
+      WORKSPACE_ROOT=""
+      continue
+    fi
+
+    if [[ ! -w "$WORKSPACE_ROOT" ]]; then
+      echo "Workspace path is not writable: $WORKSPACE_ROOT" >&2
+      WORKSPACE_ROOT=""
+      continue
+    fi
+
+    WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
+    break
+  done
+}
+
+function confirm_pecs_visibility() {
+  local step=0
+  while true; do
+    read -r -p "Is the .pecs folder visible in the workspace explorer? [y/N] " answer
+    case "$answer" in
+      [Yy]*)
+        return 0
+        ;;
+      [Nn]*)
+        echo "Please re-enter the correct workspace root path." >&2
+        read -r -p "Workspace root: " WORKSPACE_ROOT
+        if [[ -z "$WORKSPACE_ROOT" ]]; then
+          error_exit "Installer aborted by user."
+        fi
+        prompt_workspace_root
+        mkdir -p "$WORKSPACE_ROOT/.pecs"
+        ;;
+      *)
+        echo "Please answer y or n."
+        ;;
+    esac
+
+    step=$((step + 1))
+    if [[ $step -ge 3 ]]; then
+      error_exit "Unable to confirm .pecs visibility. Please verify the workspace path and retry."
+    fi
+  done
+}
+
+trap 'error_exit "Installer failed at line $LINENO."' ERR
 
 # --- Install-root safety checks ---
 UNSTABLE_ROOT=0
@@ -23,46 +79,27 @@ case "$SCRIPT_DIR" in
     ;;
 esac
 
-# --- Activate venv if present ---
-cd "$WORKSPACE_ROOT"
-if [[ -f ".venv/bin/activate" ]]; then
-  source ".venv/bin/activate"
-fi
+prompt_workspace_root
+mkdir -p "$WORKSPACE_ROOT/.pecs"
+echo "Created or verified workspace integration folder: $WORKSPACE_ROOT/.pecs"
+confirm_pecs_visibility
 
-# --- Runtime dependency guarantee ---
-echo "Checking required Python runtime dependencies..."
+echo "Checking required Python runtime..."
 PYTHON_EXEC="python3"
-if command -v python &>/dev/null; then
+if ! command -v "$PYTHON_EXEC" >/dev/null 2>&1; then
   PYTHON_EXEC="python"
 fi
-
-DEPENDENCIES=(watchdog)
-MISSING_DEPS=()
-for dep in "${DEPENDENCIES[@]}"; do
-  if ! "$PYTHON_EXEC" -c "import $dep" 2>/dev/null; then
-    MISSING_DEPS+=("$dep")
-  fi
-done
-
-if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
-  echo "Missing required dependencies: ${MISSING_DEPS[*]}"
-  echo "Attempting to install missing dependencies into the current environment..."
-  "$PYTHON_EXEC" -m pip install "${MISSING_DEPS[@]}" || {
-    echo "ERROR: Failed to install required dependencies: ${MISSING_DEPS[*]}" >&2
-    echo "Please ensure your Python environment is writable and try again." >&2
-    exit 2
-  }
-  echo "Dependencies installed: ${MISSING_DEPS[*]}"
-else
-  echo "All required dependencies are present."
+if ! command -v "$PYTHON_EXEC" >/dev/null 2>&1; then
+  error_exit "Python is not available on PATH. Install Python 3 or ensure python/py is in PATH."
 fi
 
-# --- Proceed with integration ---
-python3 "$SCRIPT_DIR/install_workspace_integration.py" "$WORKSPACE_ROOT" --repo-root "$SCRIPT_DIR"
+echo "Bootstrapping workspace: $WORKSPACE_ROOT"
+cd "$SCRIPT_DIR"
+"$PYTHON_EXEC" -m workspace_bridge_cli bootstrap-workspace "$WORKSPACE_ROOT" --repo-root "$SCRIPT_DIR" --upgrade
 
-echo "Workspace integration installed."
+echo "Workspace bootstrap completed successfully."
 if [[ $UNSTABLE_ROOT -eq 1 ]]; then
   echo "WARNING: PECS was installed from an unstable location. Move to a stable directory for persistent use." >&2
 fi
-echo "Run task 'PECS: Start Daemon' in VS Code, or run:"
-echo "PECS_PRO_REPO=\"$SCRIPT_DIR\" \"$SCRIPT_DIR/launch_pecs_daemon.sh\" \"$WORKSPACE_ROOT\""
+
+echo "To verify, run: $PYTHON_EXEC -m workspace_bridge_cli status \"$WORKSPACE_ROOT\""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import importlib.metadata
 import json
 import logging
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Dict, Optional
 
 from pecs_pro.install_workspace_integration import (
     install_workspace,
@@ -49,6 +51,24 @@ def _is_process_running(pid: int) -> bool:
         return False
 
 
+def _read_pid_file(pid_file: Path) -> Optional[int]:
+    try:
+        raw = pid_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    pid_text = raw.strip()
+    if (pid_text.startswith('"') and pid_text.endswith('"')) or (
+        pid_text.startswith("'") and pid_text.endswith("'")
+    ):
+        pid_text = pid_text[1:-1].strip()
+
+    pid_text = pid_text.strip()
+    if pid_text.isdigit():
+        return int(pid_text)
+    return None
+
+
 def _start_workspace_daemon(workspace_root: Path) -> None:
     shell_daemon = workspace_root / ".pecs" / "run_pecs_daemon.sh"
     cmd_daemon = workspace_root / ".pecs" / "run_pecs_daemon.cmd"
@@ -62,8 +82,8 @@ def _start_workspace_daemon(workspace_root: Path) -> None:
     pid_file = workspace_root / ".pecs" / "daemon.pid"
     if pid_file.exists():
         try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-            if _is_process_running(pid):
+            pid = _read_pid_file(pid_file)
+            if pid is not None and _is_process_running(pid):
                 logger.info(f"Daemon already running (PID {pid})")
                 return
             logger.warning("Stale daemon PID file found. Removing and restarting daemon.")
@@ -109,8 +129,8 @@ def _start_workspace_daemon(workspace_root: Path) -> None:
     time.sleep(2)
     if pid_file.exists():
         try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-            if _is_process_running(pid):
+            pid = _read_pid_file(pid_file)
+            if pid is not None and _is_process_running(pid):
                 logger.info(f"Daemon started successfully (PID {pid})")
                 return
         except Exception:
@@ -130,6 +150,37 @@ def _load_json(path: Path, default=None):
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
+
+
+def _format_timestamp(timestamp: object) -> str:
+    if timestamp is None:
+        return "n/a"
+    try:
+        timestamp = float(timestamp)
+        return datetime.datetime.fromtimestamp(timestamp).isoformat()
+    except Exception:
+        return str(timestamp)
+
+
+def _load_health_state(workspace_root: Path) -> Dict[str, object]:
+    return _load_json(workspace_root / ".pecs" / "daemon_health.json", {})
+
+
+def _format_health_summary(health_state: Dict[str, object]) -> str:
+    lines = []
+    lines.append(f"  Daemon version: {health_state.get('daemon_version', 'unknown')}")
+    lines.append(f"  Health status: {health_state.get('status', 'unknown')}")
+    lines.append(f"  Uptime (s): {health_state.get('uptime_seconds', 0.0)}")
+    lines.append(f"  Retrieval ready: {health_state.get('retrieval_ready', False)}")
+    lines.append(f"  Topology ready: {health_state.get('topology_ready', False)}")
+    lines.append(f"  Continuity ready: {health_state.get('continuity_ready', False)}")
+    lines.append(
+        f"  Last rebuild: {_format_timestamp(health_state.get('last_rebuild_timestamp'))}"
+    )
+    lines.append(
+        f"  Last health update: {_format_timestamp(health_state.get('last_health_update'))}"
+    )
+    return "\n".join(lines)
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -456,25 +507,79 @@ def _cmd_status(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         daemon_pid_file = workspace_root / ".pecs" / "daemon.pid"
+        health_state = _load_health_state(workspace_root)
+
+        logger.info(f"Workspace: {workspace_root}")
 
         if not daemon_pid_file.exists():
-            logger.info(f"Workspace: {workspace_root}")
             logger.info("Daemon: NOT RUNNING (no PID file)")
+            if health_state:
+                logger.info("Daemon health artifact exists but daemon is not running.")
             return
 
         try:
-            pid = int(daemon_pid_file.read_text().strip())
-            # Check if process exists
+            pid = _read_pid_file(daemon_pid_file)
+            if pid is None:
+                raise ValueError("invalid PID file")
             subprocess.run(["kill", "-0", str(pid)], check=True, capture_output=True)
-            logger.info(f"Workspace: {workspace_root}")
             logger.info(f"Daemon: RUNNING (PID {pid})")
+            if health_state:
+                logger.info("Daemon health: %s", health_state.get("status", "unknown"))
+                logger.info(_format_health_summary(health_state))
+            else:
+                logger.info("Daemon health: NONE (health artifact missing)")
         except (ValueError, subprocess.CalledProcessError):
-            logger.info(f"Workspace: {workspace_root}")
             logger.info("Daemon: STOPPED (stale PID file)")
+            if health_state:
+                logger.info("Daemon health artifact exists but PID is stale.")
 
     except Exception as e:
         logger.error(f"Status check failed: {e}")
         sys.exit(1)
+
+
+def _cmd_health(args: argparse.Namespace) -> None:
+    """Show authoritative PECS daemon health status."""
+    workspace_root = (
+        Path(args.workspace_root).resolve() if args.workspace_root else Path.cwd()
+    )
+
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    daemon_pid_file = workspace_root / ".pecs" / "daemon.pid"
+    health_state = _load_health_state(workspace_root)
+
+    if not daemon_pid_file.exists():
+        logger.error("Daemon health: NOT RUNNING (no PID file)")
+        sys.exit(1)
+
+    try:
+        pid = _read_pid_file(daemon_pid_file)
+        if pid is None:
+            raise ValueError("invalid PID file")
+    except Exception:
+        logger.error("Daemon health: invalid PID file")
+        sys.exit(1)
+
+    if not _is_process_running(pid):
+        logger.error(f"Daemon health: process {pid} is not running")
+        sys.exit(1)
+
+    if not health_state:
+        logger.error("Daemon health: health artifact missing (.pecs/daemon_health.json)")
+        sys.exit(1)
+
+    if health_state.get("status") != "healthy":
+        logger.error("Daemon health: UNHEALTHY")
+        logger.error(_format_health_summary(health_state))
+        sys.exit(1)
+
+    logger.info(f"Workspace: {workspace_root}")
+    logger.info(f"Daemon PID: {pid}")
+    logger.info(_format_health_summary(health_state))
+    sys.exit(0)
 
 
 def _cmd_refresh_workspace(args: argparse.Namespace) -> None:
@@ -558,15 +663,33 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # Check daemon
         logger.info("\nDaemon:")
         daemon_pid_file = workspace_root / ".pecs" / "daemon.pid"
+        health_state = _load_health_state(workspace_root)
         if daemon_pid_file.exists():
             try:
-                pid = int(daemon_pid_file.read_text().strip())
+                pid = _read_pid_file(daemon_pid_file)
+                if pid is None:
+                    raise ValueError("invalid PID file")
                 subprocess.run(
                     ["kill", "-0", str(pid)], check=True, capture_output=True
                 )
                 logger.info(f"  ✓ Running (PID {pid})")
+                if health_state:
+                    logger.info(f"  ✓ Health status: {health_state.get('status', 'unknown')}")
+                    logger.info(
+                        f"    Retrieval ready: {health_state.get('retrieval_ready', False)}"
+                    )
+                    logger.info(
+                        f"    Topology ready: {health_state.get('topology_ready', False)}"
+                    )
+                    logger.info(
+                        f"    Continuity ready: {health_state.get('continuity_ready', False)}"
+                    )
+                else:
+                    logger.info("  - Health artifact missing: .pecs/daemon_health.json")
             except:
                 logger.info(f"  ✗ Stale PID file (PID {pid} not running)")
+                if health_state:
+                    logger.info("  ✗ Health artifact present but daemon process is stale.")
         else:
             logger.info("  ✗ Not running")
 
@@ -903,6 +1026,17 @@ def main() -> None:
         help="Target workspace root path (default: current directory)",
     )
     status_parser.set_defaults(func=_cmd_status)
+
+    health_parser = subparsers.add_parser(
+        "health", help="Show authoritative daemon health status"
+    )
+    health_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default="",
+        help="Target workspace root path (default: current directory)",
+    )
+    health_parser.set_defaults(func=_cmd_health)
 
     doctor_parser = subparsers.add_parser(
         "doctor", help="Diagnose PECS installation and environment"

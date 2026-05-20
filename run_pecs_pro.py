@@ -91,6 +91,7 @@ class PECSProRuntime:
             execution_index=execution_index,
             ownership_index=ownership_index,
             scoring_engine=scoring_engine,
+            mode="exploratory",
         )
 
         incremental_updater = IncrementalTopologyUpdater(

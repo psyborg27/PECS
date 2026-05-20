@@ -32,7 +32,7 @@ print(f"PECS={shlex.quote(value)}")
 value = str(console.get("pecs-pro-daemon", "") or "")
 print(f"PECS_PRO_DAEMON={shlex.quote(value)}")
 PY
-  )"
+)"
   fi
   INSTALL_ROOT="${INSTALL_ROOT:-}"
   INSTALL_PYTHON="${PYTHON_PATH:-}"

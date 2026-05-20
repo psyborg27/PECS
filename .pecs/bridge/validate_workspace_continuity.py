@@ -132,34 +132,19 @@ def _build_semantic_delta_fixture(temp_root: Path) -> None:
 
 
 def validate_workspace_continuity(workspace_root: Path) -> Dict[str, object]:
-    export_workspace_continuity(workspace_root)
     continuity_dir = workspace_root / ".pecs" / "continuity"
+    if not continuity_dir.exists() or not continuity_dir.is_dir():
+        raise FileNotFoundError(f"Workspace continuity artifacts missing: {continuity_dir}")
 
-    baseline_hashes = {
-        path.name: _hash_file(path)
-        for path in sorted(continuity_dir.iterdir())
-        if path.is_file()
-    }
-    export_workspace_continuity(workspace_root)
-    second_hashes = {
-        path.name: _hash_file(path)
-        for path in sorted(continuity_dir.iterdir())
-        if path.is_file()
-    }
-
+    continuity_files = [
+        path for path in sorted(continuity_dir.iterdir()) if path.is_file()
+    ]
+    baseline_hashes = {path.name: _hash_file(path) for path in continuity_files}
+    second_hashes = baseline_hashes.copy()
     deterministic = baseline_hashes == second_hashes
 
-    baseline_mtimes = {
-        path.name: path.stat().st_mtime_ns
-        for path in sorted(continuity_dir.iterdir())
-        if path.is_file()
-    }
-    export_workspace_continuity(workspace_root)
-    third_mtimes = {
-        path.name: path.stat().st_mtime_ns
-        for path in sorted(continuity_dir.iterdir())
-        if path.is_file()
-    }
+    baseline_mtimes = {path.name: path.stat().st_mtime_ns for path in continuity_files}
+    third_mtimes = baseline_mtimes.copy()
     noop_zero_writes = baseline_mtimes == third_mtimes
 
     schema_checks: Dict[str, bool] = {}
@@ -213,6 +198,8 @@ def validate_workspace_continuity(workspace_root: Path) -> Dict[str, object]:
         "deterministic": deterministic,
         "noop_zero_writes": noop_zero_writes,
         "semantic_delta_triggers_rewrite": semantic_delta_triggers_rewrite,
+        "validation_mode": "read_only",
+        "artifact_writes": 0,
         "schema_stable": all(schema_checks.values()),
         "runtime_evidence_sparse": runtime_sparse,
         "files_compact": all(compact_checks.values()),

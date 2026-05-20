@@ -119,6 +119,29 @@ class IncrementalTopologyUpdater:
             ),
         }
 
+    def refresh_locality_authority_evidence(
+        self,
+        evidence_by_object: Dict[str, Dict[str, object]],
+        max_objects: int = 24,
+    ) -> Dict[str, object]:
+        """Return bounded evidence updates for invalidated objects only.
+
+        This preserves incremental recomputation boundaries and avoids global rescans.
+        """
+        refreshed: Dict[str, Dict[str, object]] = {}
+        invalidated = sorted(self.invalidated_objects)
+        for object_id in invalidated[:max_objects]:
+            payload = evidence_by_object.get(object_id)
+            if isinstance(payload, dict):
+                refreshed[object_id] = dict(payload)
+
+        return {
+            "refreshed_evidence": refreshed,
+            "refreshed_count": len(refreshed),
+            "invalidated_object_count": len(self.invalidated_objects),
+            "bounded_max_objects": max_objects,
+        }
+
     def clear_invalidations(self) -> None:
         self.invalidated_objects.clear()
         self.invalidated_paths.clear()

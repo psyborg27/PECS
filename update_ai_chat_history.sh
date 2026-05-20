@@ -48,4 +48,13 @@ if [[ -f ".venv/bin/activate" ]]; then
   source ".venv/bin/activate"
 fi
 
-python3 "$SCRIPT_DIR/append_ai_chat_history.py" "$WORKSPACE_ROOT" --source "$SOURCE" --message "$MESSAGE"
+PYTHON_CMD="python3"
+if ! command -v "$PYTHON_CMD" >/dev/null 2>&1; then
+  PYTHON_CMD="python"
+fi
+if ! command -v "$PYTHON_CMD" >/dev/null 2>&1; then
+  echo "ERROR: Python is not available on PATH." >&2
+  exit 1
+fi
+
+"$PYTHON_CMD" "$SCRIPT_DIR/append_ai_chat_history.py" "$WORKSPACE_ROOT" --source "$SOURCE" --message "$MESSAGE"

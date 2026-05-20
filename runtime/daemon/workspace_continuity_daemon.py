@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -10,10 +11,11 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from ..locality_activation_engine import LocalityActivationEngine
 from ..runtime_activation_logger import RuntimeActivationLogger
+from topology.archaeology.continuity_archaeology import ContinuityArchaeology
 from topology.compaction.compact_context_builder import CompactContextBuilder
 from topology.locality_traversal import LocalityTraversal
 from topology.runtime_edge_reinforcement import RuntimeEdgeReinforcement
@@ -31,6 +33,7 @@ except ImportError:
 LOG = logging.getLogger(__name__)
 
 HARD_EXCLUDED_DIRS = {
+    ".pecs",
     "backup scripts",
     "backups",
     "archive",
@@ -51,6 +54,12 @@ ENTRYPOINT_CANDIDATES = (
     "main_app.py",
     "Qt/main_app.py",
     "run_qt.py",
+)
+
+PECS_ENTRYPOINT_FALLBACKS = (
+    "run_pecs_pro.py",
+    "run_pecs_daemon.py",
+    "workspace_bridge_cli.py",
 )
 
 
@@ -77,6 +86,8 @@ class WorkspaceContinuityDaemon:
     observer: Optional[object] = field(default=None, init=False)
     current_changes: Set[Path] = field(default_factory=set, init=False)
     pid_file_name: str = "daemon.pid"
+    cycle_lock_name: str = "daemon.lock"
+    cycle_lock_ttl_seconds: int = 180
 
     workspace_id: str = field(init=False)
     runtime_reachable_files: Set[Path] = field(default_factory=set, init=False)
@@ -86,6 +97,9 @@ class WorkspaceContinuityDaemon:
     runtime_topology_edges: List[Dict[str, str]] = field(
         default_factory=list, init=False
     )
+    _start_timestamp: Optional[float] = field(default=None, init=False)
+    _last_rebuild_timestamp: Optional[float] = field(default=None, init=False)
+    _cycle_lock_owned: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.resolve()
@@ -97,6 +111,7 @@ class WorkspaceContinuityDaemon:
         )
         self.edge_reinforcement = RuntimeEdgeReinforcement()
         self.locality_traversal = LocalityTraversal()
+        self.continuity_archaeology = ContinuityArchaeology()
         self.runtime_snapshot_dir = self.artifact_dir / "runtime_topology_snapshots"
         self.runtime_snapshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -124,21 +139,41 @@ class WorkspaceContinuityDaemon:
                 "Install it with `pip3 install watchdog`."
             )
 
+        self._start_timestamp = time.time()
         self._write_pid_file()
 
-        try:
-            self._write_health_state()
-        except Exception:
-            pass
-
         self._chat_history_path = self.workspace_root / ".pecs" / "ai_chat_history.json"
+        self._ensure_chat_history_file()
         self._last_chat_history_mtime = None
         if self._chat_history_path.exists():
             self._last_chat_history_mtime = self._chat_history_path.stat().st_mtime
 
         if self._should_full_scan():
             self._clean_core_artifacts()
-            self._rebuild_runtime_topology()
+            self._run_cycle_locked(
+                cycle_name="startup_full_scan",
+                operation=lambda: self._rebuild_runtime_topology(),
+            )
+
+        if not self.runtime_locality_payload:
+            self._run_cycle_locked(
+                cycle_name="startup_topology_bootstrap",
+                operation=lambda: self._rebuild_runtime_topology(),
+            )
+
+        self._append_system_chat_event(
+            event_type="daemon_started",
+            message="PECS daemon started",
+            correlation={
+                "runtime_reachable_count": len(self.runtime_reachable_files),
+                "topology_edge_count": len(self.runtime_topology_edges),
+            },
+        )
+
+        try:
+            self._write_health_state()
+        except Exception:
+            pass
 
         class ChangeHandler(FileSystemEventHandler):
             def __init__(self, daemon: WorkspaceContinuityDaemon) -> None:
@@ -187,9 +222,6 @@ class WorkspaceContinuityDaemon:
         LOG.info(message)
 
         try:
-            if not self.runtime_locality_payload:
-                self._rebuild_runtime_topology()
-
             while True:
                 self._poll_chat_history()
                 time.sleep(1.0)
@@ -198,6 +230,7 @@ class WorkspaceContinuityDaemon:
         finally:
             observer.stop()
             observer.join()
+            self._release_cycle_lock()
             self._remove_pid_file()
 
     def stop(self) -> None:
@@ -253,6 +286,12 @@ class WorkspaceContinuityDaemon:
         self._process_changes()
 
     def _process_changes(self) -> None:
+        self._run_cycle_locked(
+            cycle_name="incremental_refresh",
+            operation=self._process_changes_unlocked,
+        )
+
+    def _process_changes_unlocked(self) -> None:
         if not self.current_changes:
             return
 
@@ -260,7 +299,7 @@ class WorkspaceContinuityDaemon:
         self.current_changes.clear()
 
         if self._chat_history_path in changed_files:
-            self._on_chat_history_update()
+            self._on_chat_history_update_unlocked()
 
         if self.runtime_activation_logger.event_path in changed_files:
             self._on_activation_update()
@@ -313,8 +352,13 @@ class WorkspaceContinuityDaemon:
                 "workspace_root": str(self.workspace_root),
                 "artifact_dir": str(self.artifact_dir),
                 "runtime_reachable_count": len(self.runtime_reachable_files),
+                "topology_edge_count": len(self.runtime_topology_edges),
+                "runtime_locality_payload_count": len(self.runtime_locality_payload),
+                "last_rebuild_timestamp": time.time(),
             },
         )
+        self._last_rebuild_timestamp = time.time()
+        self._write_health_state()
 
     def _discover_entrypoints(self) -> List[Path]:
         entrypoints: List[Path] = []
@@ -325,6 +369,15 @@ class WorkspaceContinuityDaemon:
 
         if entrypoints:
             return entrypoints
+
+        fallback_entrypoints: List[Path] = []
+        for relative in PECS_ENTRYPOINT_FALLBACKS:
+            path = (self.workspace_root / relative).resolve()
+            if path.exists() and path.suffix == ".py":
+                fallback_entrypoints.append(path)
+
+        if fallback_entrypoints:
+            return fallback_entrypoints
 
         fallback = self.workspace_root / "main.py"
         if fallback.exists():
@@ -909,7 +962,70 @@ class WorkspaceContinuityDaemon:
             self._last_chat_history_mtime = mtime
             self._on_chat_history_update()
 
+    def _ensure_chat_history_file(self) -> None:
+        self._chat_history_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._chat_history_path.exists():
+            self._chat_history_path.write_text("[]\n", encoding="utf-8")
+
+    def _append_system_chat_event(
+        self,
+        event_type: str,
+        message: str,
+        correlation: Optional[Dict[str, object]] = None,
+    ) -> None:
+        ts = time.time()
+        correlation_data = correlation or {}
+        event_id_seed = {
+            "event_type": event_type,
+            "message": message,
+            "workspace_id": self.workspace_id,
+            "pid": os.getpid(),
+            "ts_bucket": int(ts),
+        }
+        event_id = hashlib.sha256(
+            json.dumps(event_id_seed, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+        payload: Dict[str, Any] = {
+            "event_id": event_id,
+            "event_type": event_type,
+            "source": "pecs_daemon",
+            "message": message,
+            "workspace_root": str(self.workspace_root),
+            "workspace_id": self.workspace_id,
+            "continuity_namespace": self.workspace_id,
+            "ts": ts,
+            "correlation": correlation_data,
+        }
+
+        try:
+            raw = json.loads(self._chat_history_path.read_text(encoding="utf-8"))
+        except Exception:
+            raw = []
+
+        history = raw if isinstance(raw, list) else []
+        if history and isinstance(history[-1], dict):
+            if history[-1].get("event_id") == event_id:
+                return
+
+        history.append(payload)
+        self._chat_history_path.write_text(
+            json.dumps(history, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        try:
+            self._last_chat_history_mtime = self._chat_history_path.stat().st_mtime
+        except OSError:
+            pass
+
     def _on_chat_history_update(self) -> None:
+        self._run_cycle_locked(
+            cycle_name="chat_history_refresh",
+            operation=self._on_chat_history_update_unlocked,
+        )
+
+    def _on_chat_history_update_unlocked(self) -> None:
+        chat_data: object = []
         try:
             chat_data = json.loads(self._chat_history_path.read_text(encoding="utf-8"))
             self._write_json(
@@ -933,6 +1049,278 @@ class WorkspaceContinuityDaemon:
             )
             self._write_json("compact_bundle.json", compact_bundle)
             self._write_json("active_context.json", active_context)
+
+        if isinstance(chat_data, list):
+            self._refresh_locality_authority_state(chat_data)
+
+    def _cycle_lock_path(self) -> Path:
+        return self.artifact_dir / self.cycle_lock_name
+
+    def _pid_alive(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _acquire_cycle_lock(self) -> bool:
+        if self._cycle_lock_owned:
+            return True
+
+        lock_path = self._cycle_lock_path()
+        now = time.time()
+        payload = {
+            "pid": os.getpid(),
+            "workspace_root": str(self.workspace_root),
+            "ts": now,
+        }
+
+        def _try_create() -> bool:
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            fd = os.open(str(lock_path), flags)
+            try:
+                os.write(fd, json.dumps(payload, sort_keys=True).encode("utf-8"))
+            finally:
+                os.close(fd)
+            return True
+
+        try:
+            _try_create()
+            self._cycle_lock_owned = True
+            return True
+        except FileExistsError:
+            pass
+        except Exception as exc:
+            LOG.warning("Failed to create cycle lock %s: %s", lock_path, exc)
+            return False
+
+        try:
+            stale = False
+            lock_payload = {}
+            if lock_path.exists():
+                lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock_pid = int(lock_payload.get("pid", 0) or 0)
+            lock_ts = float(lock_payload.get("ts", 0.0) or 0.0)
+            lock_age = max(0.0, now - lock_ts)
+            stale = (not self._pid_alive(lock_pid)) or (
+                lock_age > float(self.cycle_lock_ttl_seconds)
+            )
+            if stale:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except TypeError:
+                    if lock_path.exists():
+                        lock_path.unlink()
+                _try_create()
+                self._cycle_lock_owned = True
+                return True
+        except Exception as exc:
+            LOG.warning("Failed to inspect or recover cycle lock %s: %s", lock_path, exc)
+
+        return False
+
+    def _release_cycle_lock(self) -> None:
+        if not self._cycle_lock_owned:
+            return
+
+        lock_path = self._cycle_lock_path()
+        try:
+            if lock_path.exists():
+                lock_path.unlink()
+        except OSError as exc:
+            LOG.warning("Failed to release cycle lock %s: %s", lock_path, exc)
+        finally:
+            self._cycle_lock_owned = False
+
+    def _validate_topology_integrity(self) -> Dict[str, object]:
+        return {
+            "topology_edges": len(self.runtime_topology_edges),
+            "runtime_reachable_files": len(self.runtime_reachable_files),
+            "topology_ok": len(self.runtime_topology_edges) >= 0,
+        }
+
+    def _validate_archaeology_consistency(self) -> Dict[str, object]:
+        archaeology = self.continuity_archaeology.to_dict()
+        return {
+            "archaeology_ok": isinstance(archaeology, dict),
+            "locality_authority_tracks": len(
+                archaeology.get("locality_authority_history", {})
+                if isinstance(archaeology, dict)
+                else {}
+            ),
+        }
+
+    def _validate_confidence_coherence(self) -> Dict[str, object]:
+        active_context_path = self.artifact_dir / "active_context.json"
+        activation_mean = 0.0
+        if active_context_path.exists():
+            try:
+                data = json.loads(active_context_path.read_text(encoding="utf-8"))
+                activation_mean = float(
+                    data.get("activation_confidence", {}).get(
+                        "mean_locality_confidence", 0.0
+                    )
+                    or 0.0
+                )
+            except Exception:
+                activation_mean = 0.0
+
+        bounded = 0.0 <= activation_mean <= 1.0
+        return {
+            "confidence_ok": bounded,
+            "mean_locality_confidence": round(
+                max(0.0, min(1.0, activation_mean)),
+                3,
+            ),
+        }
+
+    def _run_cycle_locked(
+        self,
+        cycle_name: str,
+        operation,
+    ) -> None:
+        if not self._acquire_cycle_lock():
+            LOG.info(
+                "Skipped daemon cycle '%s' for workspace %s due to active lock.",
+                cycle_name,
+                self.workspace_root,
+            )
+            return
+
+        try:
+            operation()
+            cycle_validation = {
+                "cycle": cycle_name,
+                "ts": time.time(),
+                "topology_validation": self._validate_topology_integrity(),
+                "archaeology_validation": self._validate_archaeology_consistency(),
+                "confidence_validation": self._validate_confidence_coherence(),
+            }
+            self._write_json("daemon_cycle_validation.json", cycle_validation)
+        finally:
+            self._release_cycle_lock()
+
+    def _count_persistence_signals(self, chat_data: List[Dict[str, object]]) -> int:
+        persistence_tokens = (
+            "issue persists",
+            "same behavior",
+            "still broken",
+            "no effect",
+            "nothing changed",
+        )
+        count = 0
+        for entry in chat_data[-40:]:
+            if not isinstance(entry, dict):
+                continue
+            message = str(entry.get("message", "") or "").lower()
+            if any(token in message for token in persistence_tokens):
+                count += 1
+            correlation = entry.get("correlation", {})
+            if isinstance(correlation, dict) and bool(
+                correlation.get("unresolved_persistence", False)
+            ):
+                count += 1
+        return count
+
+    def _refresh_locality_authority_state(
+        self,
+        chat_data: List[Dict[str, object]],
+    ) -> None:
+        attempted_locality = ""
+        runtime_authority_candidate = ""
+        runtime_effect_confirmed: Optional[bool] = None
+        topology_mismatch_signal = 0.0
+        duplicate_shadow_signal = 0.0
+        dead_path_signal = 0.0
+        ownership_ambiguity = 0.0
+        wrapper_only_mutation = False
+
+        for entry in reversed(chat_data[-40:]):
+            if not isinstance(entry, dict):
+                continue
+            correlation = entry.get("correlation", {})
+            if not isinstance(correlation, dict):
+                continue
+
+            if not attempted_locality:
+                attempted_locality = str(
+                    correlation.get("attempted_locality", correlation.get("locality", ""))
+                    or ""
+                ).strip()
+            if not runtime_authority_candidate:
+                runtime_authority_candidate = str(
+                    correlation.get("runtime_authority_candidate", "") or ""
+                ).strip()
+            if runtime_effect_confirmed is None and "runtime_effect_confirmed" in correlation:
+                runtime_effect_confirmed = bool(correlation.get("runtime_effect_confirmed"))
+
+            topology_mismatch_signal = max(
+                topology_mismatch_signal,
+                float(correlation.get("topology_mismatch_suspicion", 0.0) or 0.0),
+            )
+            duplicate_shadow_signal = max(
+                duplicate_shadow_signal,
+                float(correlation.get("duplicate_shadow_suspicion", 0.0) or 0.0),
+            )
+            dead_path_signal = max(
+                dead_path_signal,
+                float(correlation.get("dead_execution_path_suspicion", 0.0) or 0.0),
+            )
+            ownership_ambiguity = max(
+                ownership_ambiguity,
+                float(correlation.get("ownership_ambiguity", 0.0) or 0.0),
+            )
+            wrapper_only_mutation = wrapper_only_mutation or bool(
+                correlation.get("wrapper_only_mutation", False)
+            )
+
+        if not attempted_locality:
+            focus = self._infer_active_focus_from_chat()
+            attempted_locality = str(focus.get("active_topology_zone", "") or "")
+
+        if not runtime_authority_candidate:
+            runtime_authority_candidate = attempted_locality
+
+        runtime_activity_density: Optional[float] = None
+        if self.runtime_reachable_files:
+            runtime_activity_density = min(
+                1.0,
+                len(self.runtime_topology_edges) / max(1, len(self.runtime_reachable_files) * 2),
+            )
+
+        historical_retention_signal = min(1.0, len(chat_data[-40:]) / 40.0)
+        persistence_signal_count = self._count_persistence_signals(chat_data)
+
+        evidence = self.continuity_archaeology.derive_locality_authority_evidence(
+            attempted_locality=attempted_locality,
+            runtime_authority_candidate=runtime_authority_candidate,
+            runtime_effect_confirmed=runtime_effect_confirmed,
+            persistence_signal_count=persistence_signal_count,
+            duplicate_lineage_count=1 if duplicate_shadow_signal > 0.5 else 0,
+            wrapper_only_mutation=wrapper_only_mutation,
+            ownership_ambiguity=ownership_ambiguity,
+            topology_mismatch_signal=topology_mismatch_signal,
+            dead_execution_path_signal=dead_path_signal,
+            runtime_activity_density=runtime_activity_density,
+            historical_retention_signal=historical_retention_signal,
+        )
+        self.continuity_archaeology.register_locality_authority_evidence(
+            "active_issue",
+            evidence,
+        )
+
+        continuity_dir = self.artifact_dir / "continuity"
+        continuity_dir.mkdir(parents=True, exist_ok=True)
+        self._write_json_path(
+            continuity_dir / "locality_authority_state.json",
+            {
+                "schema": "pecs.locality_authority_state.v1",
+                "active_issue_evidence": evidence,
+                "archaeology": self.continuity_archaeology.to_dict(),
+            },
+        )
 
     def _write_json(self, name: str, data: object) -> None:
         path = self.artifact_dir / name
@@ -981,13 +1369,66 @@ class WorkspaceContinuityDaemon:
         except OSError as exc:
             LOG.warning("Failed to remove PECS daemon PID file: %s", exc)
 
+    def _daemon_version(self) -> str:
+        try:
+            return importlib.metadata.version("pecs_pro")
+        except Exception:
+            return "local"
+
+    def _health_status(self) -> Dict[str, object]:
+        runtime_ready = bool(self.runtime_locality_payload)
+        topology_ready = bool(self.runtime_reachable_files)
+        continuity_ready = runtime_ready and bool(self.runtime_topology_edges)
+        issues: List[str] = []
+
+        if not runtime_ready:
+            issues.append("runtime locality payload not initialized")
+        if not topology_ready:
+            issues.append("runtime topology not initialized")
+        if runtime_ready and not continuity_ready:
+            issues.append("continuity graph incomplete")
+
+        core_artifacts = {
+            "locality_index.json": (self.artifact_dir / "locality_index.json").exists(),
+            "topology_compact.json": (self.artifact_dir / "topology_compact.json").exists(),
+            "compact_bundle.json": (self.artifact_dir / "compact_bundle.json").exists(),
+            "active_context.json": (self.artifact_dir / "active_context.json").exists(),
+            "session_context.json": (self.artifact_dir / "session_context.json").exists(),
+            "daemon_state.json": (self.artifact_dir / "daemon_state.json").exists(),
+        }
+
+        status = "healthy" if not issues else "unhealthy"
+        if self._start_timestamp is None:
+            start_timestamp = None
+            uptime_seconds = 0.0
+        else:
+            start_timestamp = self._start_timestamp
+            uptime_seconds = max(0.0, time.time() - self._start_timestamp)
+
+        return {
+            "workspace_root": str(self.workspace_root),
+            "artifact_dir": str(self.artifact_dir),
+            "pid": os.getpid(),
+            "daemon_version": self._daemon_version(),
+            "start_time": start_timestamp,
+            "last_health_update": time.time(),
+            "uptime_seconds": round(uptime_seconds, 2),
+            "runtime_reachable_count": len(self.runtime_reachable_files),
+            "topology_edge_count": len(self.runtime_topology_edges),
+            "runtime_locality_payload_count": len(self.runtime_locality_payload),
+            "retrieval_ready": runtime_ready,
+            "topology_ready": topology_ready,
+            "continuity_ready": continuity_ready,
+            "last_rebuild_timestamp": self._last_rebuild_timestamp,
+            "health_issues": issues,
+            "status": status,
+            "core_artifacts": core_artifacts,
+        }
+
     def _write_health_state(self) -> None:
         self._write_json(
             "daemon_health.json",
-            {
-                "workspace_root": str(self.workspace_root),
-                "artifact_dir": str(self.artifact_dir),
-            },
+            self._health_status(),
         )
 
     def _is_monitored_file(self, path: Path) -> bool:

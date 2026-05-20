@@ -1,5 +1,21 @@
 # PECS-PRO
 
+## Branch Guidance
+
+- Recommended stable branch: `main`
+- Development branch: not present in this repository; use `main`
+- Current `main` status: stable and canonical for this checkout
+
+**Branch selection is critical before installation.** Always verify you are on the intended branch before onboarding a workspace:
+
+```bash
+git fetch origin
+git checkout main
+git pull origin main
+```
+
+If you are using a fork or a custom branch, install only from the branch you trust.
+
 ## IMPORTANT DISCLAIMER
 
 THIS DIRECTORY IS GENERATED CONTINUITY INFRASTRUCTURE.
@@ -21,90 +37,174 @@ PECS artifacts are queryable continuity infrastructure only.
 PECS is NOT editable engineering sourcecode.
 Use `.pecs` for locality retrieval, then edit runtime workspace modules.
 
-## Quickstart: PECS Onboarding Lifecycle
+## PECS Installation Quickstart
 
-PECS is persistent developer infrastructure. Onboarding is a lifecycle with distinct phases:
-- stable install location
-- venv creation
-- editable install
-- workspace asset installation
-- daemon startup
-- continuity refresh/bootstrap
-- operational validation
+This section describes the full install and bootstrap flow for a new user.
 
-### macOS / Linux quickstart
+### Supported platforms
+
+- macOS
+- Linux
+- Windows 10 / 11
+
+### Prerequisites
+
+- Git
+- Python 3.9 or newer
+- VS Code (recommended for task integration)
+- PowerShell or CMD on Windows
+
+### What PECS does
+
+PECS installs developer continuity infrastructure for a workspace.
+It creates a workspace-local `.pecs` folder with integration assets, daemon launchers, AI history support, and continuity refresh tools.
+
+The PECS daemon monitors workspace continuity, generates `.pecs` artifacts, and enables runtime-targeted editing support.
+
+### What `.pecs` folder creation means
+
+When `.pecs` appears in your workspace, PECS has installed integration assets. The folder contains infrastructure files only. Do not edit its contents directly.
+
+### Expected first-run behavior
+
+- The installer prompts for a workspace path if one is not provided.
+- It validates the path exists and is writable.
+- It creates `.pecs` in the target workspace.
+- It installs workspace assets, starts the daemon, runs AI history generation, and refreshes continuity.
+- Initial setup may take 30 seconds to several minutes depending on workspace size and dependency installation.
+- Errors are reported in the terminal output and by the installer.
+
+### Installation steps
+
+#### 1. Clone the repository and select the stable branch
 
 ```bash
 git clone <your-repo-url> ~/Developer/PECS
 cd ~/Developer/PECS
+git checkout main
+git pull origin main
+```
+
+#### 2. Install the PECS repository dependencies
+
+macOS / Linux:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 python -m pip install -e .
-
-# Bootstrap a workspace end-to-end
-pecs bootstrap-workspace "/Users/raj/Downloads/auto OCR app"
-
-# Or use the automated onboarding script
-./setup.sh "/Users/raj/Downloads/auto OCR app"
-
-# Verify runtime and continuity state
-pecs verify-workspace "/Users/raj/Downloads/auto OCR app"
-pecs status "/Users/raj/Downloads/auto OCR app"
-pecs refresh "/Users/raj/Downloads/auto OCR app"
-pecs doctor "/Users/raj/Downloads/auto OCR app"
 ```
 
-### Windows quickstart
+Windows PowerShell:
 
 ```powershell
-git clone <your-repo-url> "$env:USERPROFILE\Developer\PECS"
-cd "$env:USERPROFILE\Developer\PECS"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 python -m pip install -e .
-
-# Bootstrap a workspace end-to-end
-pecs bootstrap-workspace "C:\Users\<USER>\Downloads\auto OCR app"
-
-# Or use the automated onboarding scripts
-.\setup.ps1 "C:\Users\<USER>\Downloads\auto OCR app"
-setup.bat "C:\Users\<USER>\Downloads\auto OCR app"
-
-# Verify runtime and continuity state
-pecs verify-workspace "C:\Users\<USER>\Downloads\auto OCR app"
-pecs status "C:\Users\<USER>\Downloads\auto OCR app"
-pecs refresh "C:\Users\<USER>\Downloads\auto OCR app"
-pecs doctor "C:\Users\<USER>\Downloads\auto OCR app"
 ```
 
-### Workspace bootstrap command
+Windows CMD:
 
-Use `pecs bootstrap-workspace <workspace>` to perform the full onboarding lifecycle in one step.
+```bat
+python -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m pip install -e .
+```
 
-- install workspace assets
-- generate workspace-local launcher bridges
-- start the workspace daemon
-- refresh continuity state
-- validate the installation
+#### 3. Run the interactive workspace bootstrap
 
-If you want a guided prompt, use `pecs interactive-setup`.
+macOS / Linux:
 
-### Install-workspace-assets vs bootstrap-workspace
+```bash
+./install_pecs_workspace.sh
+```
 
-- `pecs install-workspace-assets <workspace>` installs integration assets and verifies workspace configuration.
-- `pecs bootstrap-workspace <workspace>` performs the complete onboarding lifecycle, including daemon startup and continuity refresh.
+Windows PowerShell:
 
-VS Code tasks:
-- `PECS: Start Daemon`
-- `PECS: Stop Daemon`
-- `PECS: Refresh Continuity State`
-- `PECS: Validate Continuity State`
-- `PECS: Append Chat Event`
+```powershell
+.\install_pecs_workspace.ps1
+```
 
+If you already know the workspace path, pass it directly:
+
+```bash
+./install_pecs_workspace.sh "/path/to/workspace"
+```
+
+```powershell
+.\install_pecs_workspace.ps1 "C:\path\to\workspace"
+```
+
+#### 4. Alternative guided flow
+
+If you prefer a built-in guided command, use:
+
+```bash
+python -m workspace_bridge_cli interactive-setup
+```
+
+This prompts for the workspace path and performs the same full bootstrap flow.
+
+### Daemon startup behavior
+
+The installer uses `pecs bootstrap-workspace` under the hood.
+That command installs workspace integration, starts the PECS daemon, runs continuity refresh, and validates the workspace.
+
+A successful daemon startup writes a PID file to:
+
+```bash
+<workspace>/.pecs/daemon.pid
+```
+
+### AI history generation behavior
+
+The bootstrap process generates and validates `.pecs/ai_chat_history.json` and the active continuity artifacts.
+If history generation fails, the installer prints the full error and stops.
+
+### Refresh behavior
+
+The installer runs a workspace refresh as part of bootstrap.
+Use this command manually later to rebuild continuity after changes:
+
+```bash
+pecs refresh "<workspace>"
+```
+
+### Verification steps
+
+After installation, verify with:
+
+```bash
+pecs verify-workspace "<workspace>"
+pecs status "<workspace>"
+pecs refresh "<workspace>"
+pecs validate "<workspace>"
+```
+
+If you installed via the repo bootstrap helper, you can also run:
+
+```bash
+python3 scripts/pecs_health_check.py
+```
+
+### Troubleshooting
+
+- Daemon failed: inspect terminal output and confirm `.pecs/daemon.pid` exists.
+- AI history generation failed: copy the full error, check Python runtime, and rerun `pecs refresh`.
+- Refresh failed: inspect the error output and ensure workspace assets exist in `.pecs`.
+- Missing `.pecs` folder: rerun the installer and confirm the workspace path.
+- Incorrect workspace path: verify the path points to the intended workspace directory.
+- Permission issues: run with sufficient permissions or choose a writable workspace location.
+- Windows execution policy issues: use `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` if PowerShell blocks scripts.
+- venv activation issues: confirm the correct Python interpreter is available as `python3` or `python` and that `.venv\Scripts\Activate.ps1` exists.
+
+If installation fails, please copy the full error output, include your OS/version, branch name, and open an issue on GitHub.
 
 ## Installation Location Guidance
 

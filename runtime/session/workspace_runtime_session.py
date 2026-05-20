@@ -111,16 +111,30 @@ class WorkspaceRuntimeSession:
         if not self.current_focus_object:
             return {}
 
+        path_id = next(iter(self.active_paths), None)
+        owner_id = self.current_focus_object
+
         context = (
             self.topology_retriever
             .build_minimal_context(
-                self.current_focus_object
+                self.current_focus_object,
+                path_id=path_id,
+                owner_id=owner_id,
+                enforce=False,
             )
         )
 
         self.active_context_cache[
             self.current_focus_object
         ] = context
+
+        self.session_metadata["last_retrieval"] = context.get("telemetry", {})
+        self.session_metadata["last_focus_context"] = {
+            "object_id": self.current_focus_object,
+            "path_id": path_id,
+            "owner_id": owner_id,
+            "retrieval_status": "success",
+        }
 
         return context
 

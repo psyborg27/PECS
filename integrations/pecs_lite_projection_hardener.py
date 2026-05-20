@@ -17,17 +17,147 @@ It intentionally sacrifices continuity completeness in favor of small-model exec
 from __future__ import annotations
 
 import re
+import os
+from types import MappingProxyType
 from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Tuple, TypedDict
+
+
+EMPTY_MAPPING: Mapping[str, object] = MappingProxyType({})
 
 
 class ProjectionProfile(Enum):
     """Projection profile for different model contexts."""
 
-    SMALL = "small"  # Qwen/DeepSeek 16k-32k: minimal targets, high confidence
-    MEDIUM = "medium"  # 32k-100k: balanced targets and neighbors
-    LARGE = "large"  # 100k+: broader but still bounded
+    SMALL = "small_local"
+    MEDIUM = "medium_local"
+    LARGE = "large_local"
+    FRONTIER_ONLINE = "frontier_online"
+    REASONING_FRONTIER = "reasoning_frontier"
+    AGENTIC_FRONTIER = "agentic_frontier"
+
+
+class CapabilityClassifier:
+    """Capability-aware profile classifier (vendor-agnostic)."""
+
+    PROFILE_BUDGETS: Dict[str, Dict[str, Any]] = {
+        "small_local": {
+            "capability_class": "weak_reasoning_local",
+            "reasoning_budget": "low",
+            "topology_budget": "minimal",
+            "locality_aggression": "high",
+            "exploration_constraints": "strict",
+            "max_related_files": 3,
+            "max_symbol_expansions": 5,
+            "max_new_files_before_validation": 2,
+        },
+        "medium_local": {
+            "capability_class": "moderate_reasoning_local",
+            "reasoning_budget": "medium",
+            "topology_budget": "bounded",
+            "locality_aggression": "medium",
+            "exploration_constraints": "guarded",
+            "max_related_files": 5,
+            "max_symbol_expansions": 8,
+            "max_new_files_before_validation": 3,
+        },
+        "large_local": {
+            "capability_class": "strong_local",
+            "reasoning_budget": "high",
+            "topology_budget": "bounded_plus",
+            "locality_aggression": "medium",
+            "exploration_constraints": "guided",
+            "max_related_files": 6,
+            "max_symbol_expansions": 12,
+            "max_new_files_before_validation": 4,
+        },
+        "frontier_online": {
+            "capability_class": "frontier_general",
+            "reasoning_budget": "high",
+            "topology_budget": "expanded",
+            "locality_aggression": "balanced",
+            "exploration_constraints": "adaptive",
+            "max_related_files": 8,
+            "max_symbol_expansions": 16,
+            "max_new_files_before_validation": 5,
+        },
+        "reasoning_frontier": {
+            "capability_class": "frontier_reasoning",
+            "reasoning_budget": "very_high",
+            "topology_budget": "expanded",
+            "locality_aggression": "balanced",
+            "exploration_constraints": "adaptive",
+            "max_related_files": 10,
+            "max_symbol_expansions": 20,
+            "max_new_files_before_validation": 6,
+        },
+        "agentic_frontier": {
+            "capability_class": "frontier_agentic",
+            "reasoning_budget": "very_high",
+            "topology_budget": "expanded_plus",
+            "locality_aggression": "balanced",
+            "exploration_constraints": "adaptive",
+            "max_related_files": 12,
+            "max_symbol_expansions": 24,
+            "max_new_files_before_validation": 8,
+        },
+    }
+
+    @classmethod
+    def classify(
+        cls,
+        model_name: str,
+        model_source: str,
+        context_window: int,
+        model_size_hint: str,
+    ) -> Dict[str, Any]:
+        source = str(model_source or "").lower().strip()
+        name = str(model_name or "").lower().strip()
+        hint = str(model_size_hint or "small").lower().strip()
+        window = int(context_window or 0)
+
+        detection_method: List[str] = []
+        if name:
+            detection_method.append("runtime_provider")
+        if source:
+            detection_method.append("environment_probe")
+        detection_method.append("behavioral_inference")
+
+        profile = "small_local"
+        confidence = 0.63
+
+        if hint == "large":
+            profile = "large_local"
+            confidence = 0.72
+        elif hint == "medium":
+            profile = "medium_local"
+            confidence = 0.70
+
+        if window >= 250000 and source in {"ollama", "local"}:
+            profile = "small_local"
+            confidence = max(confidence, 0.73)
+        elif window >= 120000 and source in {"openai", "anthropic", "azure", "cloud"}:
+            profile = "reasoning_frontier" if "reason" in name else "frontier_online"
+            confidence = max(confidence, 0.76)
+
+        if "agent" in name:
+            profile = "agentic_frontier"
+            confidence = max(confidence, 0.75)
+
+        return {
+            "projection_profile": {
+                "profile": profile,
+                **cls.PROFILE_BUDGETS[profile],
+            },
+            "model_detection": {
+                "model_name": model_name or "unknown",
+                "model_source": model_source or "unknown",
+                "context_window": window,
+                "detection_confidence": round(confidence, 2),
+                "detection_method": detection_method,
+            },
+        }
 
 
 @dataclass
@@ -76,6 +206,18 @@ class QueryFlowDiagnostics:
     artifacts_accessed: List[str]  # .pecs files read
     artifacts_not_generated: List[str]  # things NOT created
     timestamp: str
+
+
+class CapabilityBundleEnvelope(TypedDict):
+    projection_profile: Dict[str, object]
+    model_detection: Dict[str, object]
+
+
+class GovernanceTransferEnvelope(TypedDict):
+    engineering_continuity: Dict[str, object]
+    capability_bundle: CapabilityBundleEnvelope
+    behavioral_signals: Dict[str, object]
+    runtime_context: Dict[str, object]
 
 
 class ConfidenceScorer:
@@ -139,6 +281,45 @@ class ConfidenceScorer:
         )
 
 
+class EvidenceContradictionResolver:
+    """
+    Resolves evidence contradictions deterministically.
+    """
+
+    @staticmethod
+    def resolve_conflicts(evidence_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Resolve contradictions in evidence records.
+
+        Args:
+            evidence_records (List[Dict[str, Any]]): List of evidence records.
+
+        Returns:
+            List[Dict[str, Any]]: Updated evidence records with resolved contradictions.
+        """
+        resolved_records = []
+
+        for record in evidence_records:
+            runtime_confirmed = record.get("runtime_confirmed", False)
+            user_rejected = record.get("user_rejected", False)
+            confidence_score = record.get("confidence_score", 0.0)
+
+            # Downgrade confidence for user-rejected evidence
+            if user_rejected:
+                record["confidence_score"] *= 0.5
+
+            # Prioritize runtime-confirmed evidence
+            if runtime_confirmed:
+                record["confidence_score"] = min(record["confidence_score"] + 0.2, 1.0)
+
+            # Mark contradictions as visible
+            record["contradiction_visible"] = user_rejected or not runtime_confirmed
+
+            resolved_records.append(record)
+
+        return resolved_records
+
+
 class ProjectionHardener:
     """Hardens locality projections for small models."""
 
@@ -161,6 +342,24 @@ class ProjectionHardener:
             "secondary_neighbors": 6,
             "token_budget": 8000,
             "breadth_limit": 16,
+        },
+        ProjectionProfile.FRONTIER_ONLINE: {
+            "primary_targets": 12,
+            "secondary_neighbors": 8,
+            "token_budget": 10000,
+            "breadth_limit": 20,
+        },
+        ProjectionProfile.REASONING_FRONTIER: {
+            "primary_targets": 14,
+            "secondary_neighbors": 10,
+            "token_budget": 12000,
+            "breadth_limit": 24,
+        },
+        ProjectionProfile.AGENTIC_FRONTIER: {
+            "primary_targets": 16,
+            "secondary_neighbors": 12,
+            "token_budget": 14000,
+            "breadth_limit": 28,
         },
     }
 
@@ -222,20 +421,6 @@ class ProjectionHardener:
         return guidance
 
     def harden_projection(
-        self, profile: ProjectionProfile, raw_projection: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Harden projection based on profile."""
-        # ...existing code...
-        if profile == ProjectionProfile.SMALL:
-            sanitized_projection = self.sanitize_projection(raw_projection)
-            guidance = self.generate_operational_guidance(sanitized_projection)
-            return {
-                "guidance": guidance,
-                "structured_targets": sanitized_projection,
-            }
-        # ...existing code...
-
-    def harden_projection(
         self,
         raw_targets: List[Any],
         profile: ProjectionProfile = ProjectionProfile.SMALL,
@@ -244,7 +429,7 @@ class ProjectionHardener:
         wrapper_warning: bool = False,
         issue_query: str = "",
         runtime_zone_count: int = 1,
-        engineering_continuity: Dict[str, Any] = None,
+        engineering_continuity: Mapping[str, object] = EMPTY_MAPPING,
     ) -> Tuple[List[str], List[str], ProjectionMetrics]:
         """
         Harden a projection for small models.
@@ -255,7 +440,7 @@ class ProjectionHardener:
 
         limits = self.LIMITS[profile]
 
-        continuity_signals = engineering_continuity or {}
+        continuity_signals = dict(engineering_continuity)
         continuity_anchor_candidates = self._continuity_anchor_candidates(
             continuity_signals
         )
@@ -280,7 +465,8 @@ class ProjectionHardener:
             limit=limits["primary_targets"],
         )
 
-        accepted_scores = continuity_signals.get("accepted_locality_scores", {}) or {}
+        accepted_scores_raw = continuity_signals.get("accepted_locality_scores", {})
+        accepted_scores = accepted_scores_raw if isinstance(accepted_scores_raw, dict) else {}
         if accepted_scores:
             best_accepted_path, best_accepted_score = max(
                 accepted_scores.items(), key=lambda item: float(item[1])
@@ -393,14 +579,15 @@ class ProjectionHardener:
         self,
         targets: List[Any],
         issue_query: str = "",
-        continuity_signals: Dict[str, Any] = None,
+        continuity_signals: Mapping[str, object] = EMPTY_MAPPING,
     ) -> List[ConfidenceScore]:
         """Score all target candidates."""
         scored: List[ConfidenceScore] = []
         query_tokens = self.normalize_issue_query(issue_query)
-        continuity_signals = continuity_signals or {}
-        accepted_scores = continuity_signals.get("accepted_locality_scores", {}) or {}
-        rejected_scores = continuity_signals.get("rejected_locality_scores", {}) or {}
+        accepted_scores_raw = continuity_signals.get("accepted_locality_scores", {})
+        rejected_scores_raw = continuity_signals.get("rejected_locality_scores", {})
+        accepted_scores = accepted_scores_raw if isinstance(accepted_scores_raw, dict) else {}
+        rejected_scores = rejected_scores_raw if isinstance(rejected_scores_raw, dict) else {}
 
         # Try to get scoring context from adapter if available
         # For now, assign default scores based on order (first = highest confidence)
@@ -466,11 +653,12 @@ class ProjectionHardener:
 
     def _continuity_anchor_candidates(
         self,
-        continuity_signals: Dict[str, Any],
+        continuity_signals: Mapping[str, object],
     ) -> List[Dict[str, Any]]:
         """Inject accepted engineering locality anchors as bounded candidates."""
         candidates: List[Dict[str, Any]] = []
-        accepted_scores = continuity_signals.get("accepted_locality_scores", {}) or {}
+        accepted_scores_raw = continuity_signals.get("accepted_locality_scores", {})
+        accepted_scores = accepted_scores_raw if isinstance(accepted_scores_raw, dict) else {}
         for file_path, confidence in accepted_scores.items():
             normalized = str(file_path or "").strip()
             if not normalized or normalized.startswith(".pecs/"):
@@ -631,7 +819,11 @@ class ProjectionHardener:
 
         # Check: no .pecs paths exposed
         for target in targets:
-            if ".pecs/" in target:
+            if isinstance(target, dict):
+                probable_file = str(target.get("probable_file", "") or "")
+                if probable_file.startswith(".pecs/"):
+                    issues.append(f"Exposed .pecs artifact: {probable_file}")
+            elif isinstance(target, str) and ".pecs/" in target:
                 issues.append(f"Exposed .pecs artifact: {target}")
 
         # Check: no raw topology
@@ -705,6 +897,52 @@ class ProjectionExporter:
         "Use projected runtime targets to locate editable workspace files only."
     )
 
+    @staticmethod
+    def _require_dict(label: str, value: object) -> Dict[str, object]:
+        if not isinstance(value, dict):
+            raise ValueError(f"{label} must be an object")
+        normalized: Dict[str, object] = {}
+        for key, raw in value.items():
+            normalized[str(key)] = raw
+        return normalized
+
+    @classmethod
+    def _parse_governance_transfer_envelope(
+        cls,
+        engineering_continuity: Mapping[str, object],
+        capability_bundle: Mapping[str, object],
+        behavioral_signals: Mapping[str, object],
+        runtime_context: Mapping[str, object],
+    ) -> GovernanceTransferEnvelope:
+        # Type-check capability_bundle before unpacking
+        if not isinstance(capability_bundle, dict):
+            raise ValueError("capability_bundle must be an object")
+        
+        capability_bundle_dict = cls._require_dict("capability_bundle", capability_bundle)
+        profile_raw = capability_bundle_dict.get("projection_profile")
+        detection_raw = capability_bundle_dict.get("model_detection")
+        if profile_raw is None or detection_raw is None:
+            raise ValueError(
+                "capability_bundle requires projection_profile and model_detection"
+            )
+
+        projection_profile = cls._require_dict("capability_bundle.projection_profile", profile_raw)
+        model_detection = cls._require_dict("capability_bundle.model_detection", detection_raw)
+
+        return {
+            "engineering_continuity": cls._require_dict(
+                "engineering_continuity", dict(engineering_continuity)
+            ),
+            "capability_bundle": {
+                "projection_profile": projection_profile,
+                "model_detection": model_detection,
+            },
+            "behavioral_signals": cls._require_dict(
+                "behavioral_signals", dict(behavioral_signals)
+            ),
+            "runtime_context": cls._require_dict("runtime_context", dict(runtime_context)),
+        }
+
     @classmethod
     def export_projection(
         cls,
@@ -717,19 +955,82 @@ class ProjectionExporter:
         wrapper_warning: bool,
         profile: str = "small",
         adapter: Any = None,
-        engineering_continuity: Dict[str, Any] = None,
+        engineering_continuity: Mapping[str, object] = EMPTY_MAPPING,
+        issue_query: str = "",
+        capability_bundle: Mapping[str, object] = EMPTY_MAPPING,
+        behavioral_signals: Mapping[str, object] = EMPTY_MAPPING,
+        runtime_context: Mapping[str, object] = EMPTY_MAPPING,
     ) -> Dict[str, Any]:
         """Export projection with profile-specific enrichment."""
 
+        envelope = cls._parse_governance_transfer_envelope(
+            engineering_continuity=engineering_continuity,
+            capability_bundle=capability_bundle,
+            behavioral_signals=behavioral_signals,
+            runtime_context=runtime_context,
+        )
+        engineering_continuity_dict = envelope["engineering_continuity"]
+        capability_bundle_dict = envelope["capability_bundle"]
+        behavioral_signals_dict = envelope["behavioral_signals"]
+        runtime_context_dict = envelope["runtime_context"]
+        profile_view = capability_bundle_dict["projection_profile"]
+        model_detection = capability_bundle_dict["model_detection"]
+        evidence_fusion = (
+            adapter.evidence_fusion_lookup(max_files=128)
+            if adapter is not None and hasattr(adapter, "evidence_fusion_lookup")
+            else {"schema": "pecs.evidence_fusion.v1", "deterministic": True, "weights": {}, "ranked_files": []}
+        )
+
+        runtime_targets = cls._build_structured_runtime_targets(
+            adapter=adapter,
+            hardener=hardener,
+            primary_targets=primary_targets,
+            secondary_neighbors=secondary_neighbors,
+            issue_query=issue_query,
+            profile_view=profile_view,
+            engineering_continuity=engineering_continuity_dict,
+            behavioral_signals=behavioral_signals_dict,
+            evidence_fusion=evidence_fusion,
+        )
+
+        authority_confidence = 0.0
+        if runtime_targets:
+            authority_confidence = sum(
+                float(target.get("confidence", 0.0) or 0.0) for target in runtime_targets
+            ) / len(runtime_targets)
+
+        pecs_lite_status = {
+            "runtime_observability_used": False,
+            "engineering_continuity_used": False,
+            "workspace_scan_performed": False,
+            "symbol_resolution_used": False,
+            "behavioral_analysis_used": bool(behavioral_signals_dict),
+            "capability_detection_used": bool(model_detection),
+            "authority_confidence": round(max(0.0, min(1.0, authority_confidence)), 3),
+        }
+        if adapter is not None and hasattr(adapter, "projection_status"):
+            any_symbol = any(bool(t.get("probable_method") or t.get("probable_class")) for t in runtime_targets)
+            pecs_lite_status = adapter.projection_status(
+                symbol_resolution_used=any_symbol,
+                behavioral_analysis_used=bool(behavioral_signals_dict),
+                capability_detection_used=bool(model_detection),
+                authority_confidence=authority_confidence,
+            )
+
         projection = {
-            "schema": "pecs_lite.runtime_projection.hardened.v1",
+            "schema": "pecs_lite.runtime_projection.locality_authority.v3",
             "disclaimer": cls.DISCLAIMER,
             "profile": metrics.profile,
-            "runtime_targets": primary_targets,
+            "projection_profile": profile_view,
+            "model_detection": model_detection,
+            "runtime_targets": runtime_targets,
             "secondary_neighbors": secondary_neighbors,
             "likely_execution_cluster": active_zone,
             "possible_mutation_owner": mutation_owner,
             "wrapper_warning": wrapper_warning,
+            "deterministic": True,
+            "runtime_mode": "read_only",
+            "artifact_writes": 0,
             "metrics": asdict(metrics),
             "diagnostics": asdict(hardener.diagnostics),
             "continuity_supporting_artifacts": [
@@ -742,17 +1043,23 @@ class ProjectionExporter:
             "confidence_projection": cls._build_confidence_projection(
                 hardener, primary_targets, secondary_neighbors
             ),
+            "pecs_lite_status": pecs_lite_status,
+            "runtime_context": runtime_context_dict,
+            "evidence_fusion": evidence_fusion,
         }
+
+        if behavioral_signals_dict:
+            projection["behavioral_signals"] = behavioral_signals_dict
 
         continuity_view = cls._build_active_engineering_continuity(
             profile=profile,
-            continuity_signals=engineering_continuity or {},
+            continuity_signals=engineering_continuity_dict,
         )
         if continuity_view:
             projection["active_engineering_continuity"] = continuity_view
 
         # Add profile-specific enrichment
-        if profile in ["medium", "large"] and adapter:
+        if profile in ["medium", "large", "medium_local", "large_local", "frontier_online", "reasoning_frontier", "agentic_frontier"] and adapter:
             projection["execution_enrichment"] = cls._build_execution_enrichment(
                 adapter,
                 primary_targets,
@@ -760,7 +1067,151 @@ class ProjectionExporter:
                 profile,
             )
 
+        projection["pecs_runtime_report"] = cls._build_pecs_runtime_report(
+            adapter=adapter,
+            projection=projection,
+            metrics=metrics,
+            active_zone=active_zone,
+            issue_query=issue_query,
+            profile_view=profile_view,
+            behavioral_signals=behavioral_signals_dict,
+            evidence_fusion=evidence_fusion,
+        )
+
         return projection
+
+    @classmethod
+    def _build_structured_runtime_targets(
+        cls,
+        adapter: Any,
+        hardener: ProjectionHardener,
+        primary_targets: List[str],
+        secondary_neighbors: List[str],
+        issue_query: str,
+        profile_view: Dict[str, Any],
+        engineering_continuity: Dict[str, Any],
+        behavioral_signals: Dict[str, Any],
+        evidence_fusion: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if adapter is None:
+            return []
+
+        related_cap = int(profile_view.get("max_related_files", 3) or 3)
+        max_symbol_expansions = int(profile_view.get("max_symbol_expansions", 5) or 5)
+        max_new_files = int(profile_view.get("max_new_files_before_validation", 2) or 2)
+        evidence_by_file = {
+            str(item.get("file", "") or ""): item
+            for item in (evidence_fusion.get("ranked_files", []) or [])
+            if isinstance(item, dict)
+        }
+
+        chains = engineering_continuity.get("active_engineering_chains", []) or []
+        expected_outcome = (
+            str(chains[0].get("issue", "")) if chains else str(issue_query or "")
+        )
+
+        targets: List[Dict[str, Any]] = []
+        for idx, file_path in enumerate(primary_targets):
+            confidence_entry = hardener.last_confidence_by_path.get(file_path, {})
+            confidence = float(confidence_entry.get("confidence", 0.0) or 0.0)
+            symbol_info = adapter.resolve_symbol_authority(file_path=file_path, issue_query=issue_query)
+            related = adapter.related_files_for(file_path=file_path, max_related=related_cap)
+            chain = adapter.entrypoint_chain_for(file_path=file_path, max_depth=5)
+            authority_type = adapter.classify_authority_type(file_path)
+            if idx > 0 and authority_type == "primary":
+                authority_type = "secondary"
+
+            likely_failure_mode = "wrapper_indirection" if authority_type == "wrapper" else "mutation_misdirection"
+            if authority_type in {"legacy", "deprecated"}:
+                likely_failure_mode = "stale_adapter"
+
+            evidence_entry = evidence_by_file.get(file_path, {})
+            fused_score = float(evidence_entry.get("fused_score", confidence) or confidence)
+            tier_scores = evidence_entry.get("tier_scores", {}) if isinstance(evidence_entry.get("tier_scores", {}), dict) else {}
+            fusion_sources = evidence_entry.get("provenance", []) if isinstance(evidence_entry.get("provenance", []), list) else []
+
+            search_expansion_allowed = bool(
+                fused_score >= 0.45
+                and float(tier_scores.get("tier_1_runtime", 0.0) or 0.0) >= 0.25
+                and float(tier_scores.get("tier_2_continuity", 0.0) or 0.0) >= 0.20
+            )
+            expansion_level = "restricted"
+            if search_expansion_allowed and fused_score >= 0.70:
+                expansion_level = "bounded"
+
+            supporting_symbols = list(symbol_info.get("supporting_symbols", []))[:max_symbol_expansions]
+            target = {
+                "task_hint": str(issue_query or "inferred_issue").strip() or "inferred_issue",
+                "expected_outcome": expected_outcome or "runtime ownership confirmation",
+                "probable_file": file_path,
+                "probable_class": symbol_info.get("probable_class", ""),
+                "probable_method": symbol_info.get("probable_method", ""),
+                "confidence": round(max(0.0, min(1.0, fused_score)), 3),
+                "authority_type": authority_type,
+                "evidence_tiers": {
+                    "tier_0_static": round(float(tier_scores.get("tier_0_static", 0.0) or 0.0), 3),
+                    "tier_1_runtime": round(float(tier_scores.get("tier_1_runtime", 0.0) or 0.0), 3),
+                    "tier_2_continuity": round(float(tier_scores.get("tier_2_continuity", 0.0) or 0.0), 3),
+                    "tier_3_validation": round(float(tier_scores.get("tier_3_validation", 0.0) or 0.0), 3),
+                },
+                "evidence_sources": sorted(fusion_sources),
+                "supporting_symbols": supporting_symbols,
+                "related_files": related,
+                "entrypoint_chain": chain,
+                "expected_edit_scope": "method",
+                "safe_to_edit": authority_type in {"primary", "secondary"},
+                "do_not_edit": [".pecs/", "generated/", "legacy_runtime_adapter.py"],
+                "predicted_failure_mode": likely_failure_mode,
+                "search_expansion_allowed": search_expansion_allowed,
+                "search_budget": {
+                    "max_new_files_before_validation": max_new_files,
+                    "max_symbol_expansions": max_symbol_expansions,
+                    "require_runtime_confirmation_before_breadth_expansion": True,
+                    "expansion_level": expansion_level,
+                },
+                "last_verified": "runtime-confirmed",
+            }
+            targets.append(target)
+
+        for file_path in secondary_neighbors[: max(0, max_new_files - 1)]:
+            if any(item.get("probable_file") == file_path for item in targets):
+                continue
+            symbol_info = adapter.resolve_symbol_authority(file_path=file_path, issue_query=issue_query)
+            targets.append(
+                {
+                    "task_hint": str(issue_query or "inferred_issue").strip() or "inferred_issue",
+                    "expected_outcome": expected_outcome or "runtime ownership confirmation",
+                    "probable_file": file_path,
+                    "probable_class": symbol_info.get("probable_class", ""),
+                    "probable_method": symbol_info.get("probable_method", ""),
+                    "confidence": round(float(hardener.last_confidence_by_path.get(file_path, {}).get("confidence", 0.45) or 0.45), 3),
+                    "authority_type": "secondary",
+                    "evidence_tiers": {
+                        "tier_0_static": round(float((evidence_by_file.get(file_path, {}).get("tier_scores", {}) or {}).get("tier_0_static", 0.0) or 0.0), 3),
+                        "tier_1_runtime": round(float((evidence_by_file.get(file_path, {}).get("tier_scores", {}) or {}).get("tier_1_runtime", 0.0) or 0.0), 3),
+                        "tier_2_continuity": round(float((evidence_by_file.get(file_path, {}).get("tier_scores", {}) or {}).get("tier_2_continuity", 0.0) or 0.0), 3),
+                        "tier_3_validation": round(float((evidence_by_file.get(file_path, {}).get("tier_scores", {}) or {}).get("tier_3_validation", 0.0) or 0.0), 3),
+                    },
+                    "evidence_sources": sorted((evidence_by_file.get(file_path, {}).get("provenance", []) or [])),
+                    "supporting_symbols": list(symbol_info.get("supporting_symbols", []))[: max_symbol_expansions],
+                    "related_files": adapter.related_files_for(file_path=file_path, max_related=max(1, related_cap - 1)),
+                    "entrypoint_chain": adapter.entrypoint_chain_for(file_path=file_path, max_depth=4),
+                    "expected_edit_scope": "method",
+                    "safe_to_edit": True,
+                    "do_not_edit": [".pecs/", "generated/", "legacy_runtime_adapter.py"],
+                    "predicted_failure_mode": "topology_drift",
+                    "search_expansion_allowed": False,
+                    "search_budget": {
+                        "max_new_files_before_validation": max_new_files,
+                        "max_symbol_expansions": max_symbol_expansions,
+                        "require_runtime_confirmation_before_breadth_expansion": True,
+                        "expansion_level": "restricted",
+                    },
+                    "last_verified": "runtime-confirmed",
+                }
+            )
+
+        return targets
 
     @classmethod
     def _build_execution_enrichment(
@@ -774,7 +1225,7 @@ class ProjectionExporter:
 
         enrichment = {}
 
-        if profile == "medium":
+        if profile in {"medium", "medium_local", "frontier_online"}:
             enrichment["execution_neighborhood"] = {
                 "primary_execution_focus": primary_targets[:3],
                 "nearby_execution_adjacency": secondary_neighbors[:2],
@@ -782,7 +1233,7 @@ class ProjectionExporter:
                 "wrapper_expansion_indicated": adapter.wrapper_warning_lookup(),
             }
 
-        elif profile == "large":
+        elif profile in {"large", "large_local", "reasoning_frontier", "agentic_frontier"}:
             enrichment["execution_continuity"] = {
                 "primary_execution_targets": primary_targets,
                 "secondary_execution_adjacency": secondary_neighbors,
@@ -841,6 +1292,144 @@ class ProjectionExporter:
                 for path in secondary_neighbors
             ],
             "uncertainty": hardener.last_confidence_uncertainty,
+        }
+
+    @classmethod
+    def _build_pecs_runtime_report(
+        cls,
+        adapter: Any,
+        projection: Dict[str, Any],
+        metrics: ProjectionMetrics,
+        active_zone: str,
+        issue_query: str,
+        profile_view: Dict[str, Any],
+        behavioral_signals: Dict[str, Any],
+        evidence_fusion: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        # Return minimal report if adapter is None
+        if adapter is None:
+            default_artifacts = [
+                ".pecs/active_context.json",
+                ".pecs/compact_bundle.json",
+                ".pecs/locality_index.json",
+                ".pecs/topology_compact.json",
+                ".pecs/continuity/locality_state.json",
+                ".pecs/continuity/active_topology.json",
+                ".pecs/continuity/engineering_continuity_state.json",
+            ]
+            return {
+                "PECS STATUS": {
+                    "workspace": "unknown",
+                    "runtime_zones": [],
+                    "missing_manifests": default_artifacts,
+                }
+            }
+        
+        artifact_candidates = [
+            ".pecs/active_context.json",
+            ".pecs/compact_bundle.json",
+            ".pecs/locality_index.json",
+            ".pecs/topology_compact.json",
+            ".pecs/continuity/locality_state.json",
+            ".pecs/continuity/active_topology.json",
+            ".pecs/continuity/engineering_continuity_state.json",
+        ]
+        missing_manifests = [
+            path for path in artifact_candidates
+            if not os.path.exists(os.path.join(str(adapter.workspace_root), path))
+        ]
+
+        active_runtime_zones = adapter.runtime_zone_lookup()
+        selected_files = [
+            item.get("probable_file") for item in projection.get("runtime_targets", [])
+        ]
+        search_expansion_level = profile_view.get("exploration_constraints", "strict")
+        context_budget = profile_view.get("reasoning_budget", "low")
+        context_expansion_level = "minimal"
+        if context_budget in {"medium", "high", "very_high"}:
+            context_expansion_level = "bounded"
+        if context_budget in {"very_high"}:
+            context_expansion_level = "expanded"
+
+        unresolved_localities = []
+        for chain in (projection.get("active_engineering_continuity", {}).get("chains", []) or []):
+            if chain.get("unresolved_locality"):
+                unresolved_localities.extend(chain.get("unresolved_locality", []))
+
+        fusion_ranked = evidence_fusion.get("ranked_files", []) if isinstance(evidence_fusion, dict) else []
+        fusion_weights = evidence_fusion.get("weights", {}) if isinstance(evidence_fusion, dict) else {}
+        fusion_preview = [
+            {
+                "file": str(item.get("file", "") or ""),
+                "fused_score": float(item.get("fused_score", 0.0) or 0.0),
+                "tier_scores": item.get("tier_scores", {}),
+            }
+            for item in fusion_ranked[:8]
+            if isinstance(item, dict)
+        ]
+
+        return {
+            "PECS STATUS": {
+                "workspace": str(adapter.workspace_root),
+                "mode": "PECS-LITE",
+                "runtime_interface": "stateless_query",
+                "deterministic": True,
+                "validation_state": "read_only",
+                "runtime_mode": "read_only",
+                "artifact_writes": 0,
+            },
+            "PECS ARTIFACTS": {
+                "continuity_artifacts_used": [
+                    ".pecs/continuity/active_topology.json",
+                    ".pecs/continuity/engineering_continuity_state.json",
+                    ".pecs/continuity/locality_state.json",
+                ],
+                "locality_artifacts_used": [
+                    ".pecs/locality_index.json",
+                    ".pecs/compact_bundle.json",
+                    ".pecs/active_context.json",
+                    ".pecs/topology_compact.json",
+                ],
+                "runtime_modules_consulted": [
+                    "integrations.pecs_pro_query_adapter.PECSProQueryAdapter",
+                    "integrations.pecs_lite_projection_hardener.ProjectionHardener",
+                    "integrations.pecs_lite_projection_hardener.ProjectionExporter",
+                ],
+            },
+            "EVIDENCE FUSION": {
+                "schema": str(evidence_fusion.get("schema", "pecs.evidence_fusion.v1")),
+                "deterministic": bool(evidence_fusion.get("deterministic", True)),
+                "weights": fusion_weights,
+                "scoring_formula": "fused_score = sum(weight[tier] * tier_score[tier])",
+                "top_ranked_files": fusion_preview,
+            },
+            "LOCALITY RESOLUTION": {
+                "authoritative_ownership_files": [
+                    ".pecs/locality_index.json",
+                    ".pecs/continuity/engineering_continuity_state.json",
+                ],
+                "subsystem_roots": active_runtime_zones,
+                "authority_source": "PECS-PRO artifacts",
+                "inferred": False,
+            },
+            "SEARCH PLAN": {
+                "search_expansion_level": search_expansion_level,
+                "recursive_scan": False,
+                "escalation_state": "none",
+                "selected traversal roots": adapter.runtime_confirmed_neighborhood_lookup(max_neighbors=4),
+            },
+            "EXECUTION SCOPE": {
+                "selected_files": selected_files,
+                "estimated_token_usage": metrics.projected_token_estimate,
+                "subsystem_target": active_zone,
+                "context_expansion_level": context_expansion_level,
+            },
+            "UNRESOLVED": {
+                "unresolved_ownership": sorted(set(unresolved_localities)),
+                "fallback_manual_search_usage": False,
+                "missing_manifests": sorted(missing_manifests),
+                "unresolved_runtime_authority": bool(projection.get("active_engineering_continuity", {}).get("chains", [])) and not projection.get("continuity_supporting_artifacts"),
+            },
         }
 
     @classmethod

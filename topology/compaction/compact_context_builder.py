@@ -29,7 +29,7 @@ class CompactContextBuilder:
     - layered export coordinators
 
     The builder remains:
-    deterministic
+    probabilistic
     locality-oriented
     topology-aware
     low-token
@@ -46,8 +46,12 @@ class CompactContextBuilder:
         self,
         object_id: str,
         locality_limit: Optional[int] = None,
+        continuity_signals: Optional[Dict[str, object]] = None,
     ) -> Dict[str, object]:
-        anchors = self.topology_retriever.retrieve_object_locality(object_id)
+        retrieval = self.topology_retriever.retrieve_continuity_context(
+            object_id=object_id,
+            continuity_signals=continuity_signals,
+        )
 
         limit = (
             locality_limit
@@ -55,19 +59,18 @@ class CompactContextBuilder:
             else self.default_locality_limit
         )
 
-        compact_anchors = anchors[:limit]
-
-        minimal_context = self.topology_retriever.build_minimal_context(object_id)
+        compact_anchors = retrieval["anchors"][:limit]
 
         return {
             "object_id": object_id,
             "anchors": compact_anchors,
             "locality": compact_anchors,
-            "confidence": minimal_context.get(
-                "confidence",
-                0.0,
-            ),
+            "confidence": retrieval["scores"]["confidence"],
+            "retrieval_score": retrieval["scores"],
+            "duplicate_lineages": retrieval["duplicate_lineages"],
+            "token_estimate": retrieval["token_estimate"],
             "anchor_count": len(compact_anchors),
+            "retrieval_metadata": retrieval,
         }
 
     def build_multi_object_context(
@@ -95,13 +98,13 @@ class CompactContextBuilder:
         object_id: str,
         path_id: str,
         locality_limit: Optional[int] = None,
+        continuity_signals: Optional[Dict[str, object]] = None,
     ) -> Dict[str, object]:
-        object_context = self.build_compact_object_context(
+        retrieval = self.topology_retriever.retrieve_continuity_context(
             object_id=object_id,
-            locality_limit=locality_limit,
+            path_id=path_id,
+            continuity_signals=continuity_signals,
         )
-
-        execution_anchors = self.topology_retriever.retrieve_execution_locality(path_id)
 
         limit = (
             locality_limit
@@ -109,11 +112,19 @@ class CompactContextBuilder:
             else self.default_locality_limit
         )
 
+        compact_anchors = retrieval["anchors"][:limit]
+
         return {
-            "object_context": object_context,
-            "execution_anchors": (execution_anchors[:limit]),
-            "execution_locality": (execution_anchors[:limit]),
+            "object_id": object_id,
             "execution_path": path_id,
+            "anchors": compact_anchors,
+            "execution_locality": retrieval["execution_locality"][:limit],
+            "locality": compact_anchors,
+            "confidence": retrieval["scores"]["confidence"],
+            "retrieval_score": retrieval["scores"],
+            "duplicate_lineages": retrieval["duplicate_lineages"],
+            "token_estimate": retrieval["token_estimate"],
+            "retrieval_metadata": retrieval,
         }
 
     def export_low_token_bundle(

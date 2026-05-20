@@ -29,6 +29,17 @@ RECOMMENDED_ROOTS = [
 
 REQUIRED_DEPENDENCIES = ["watchdog"]
 WORKSPACE_INSTALL_ROOT_CONFIG = "install_root.json"
+GLOBAL_PECS_DIRNAME = ".pecs"
+GLOBAL_PECS_CONFIG = "config.json"
+GLOBAL_RUNTIME_REGISTRY = "runtime_registry.json"
+
+DEFAULT_RETRIEVAL_PRIORITY = [
+    "workspace_locality",
+    "topology",
+    "ownership",
+    "governance_runtime",
+    "modes",
+]
 
 
 def _get_central_python(repo_root: Path) -> str:
@@ -92,6 +103,10 @@ def print_install_root_guidance(repo_root: Path):
 
 
 def health_check(workspace_root: Path, repo_root: Path, verbose: bool = False) -> dict:
+    global_registry_path = _global_runtime_registry_path()
+    governance_runtime_path = _global_pecs_dir() / "GOVERNANCE_RUNTIME.md"
+    modes_path = _global_pecs_dir() / "MODES.md"
+
     results = {
         "install_root": str(repo_root),
         "install_root_stable": not is_unstable_root(repo_root),
@@ -107,6 +122,12 @@ def health_check(workspace_root: Path, repo_root: Path, verbose: bool = False) -
         "workspace_install_root_matches_repo_root": False,
         "package_installed": False,
         "console_scripts": {},
+        "runtime_registry_path": str(global_registry_path),
+        "runtime_registry_exists": global_registry_path.exists(),
+        "governance_runtime_path": str(governance_runtime_path),
+        "governance_runtime_exists": governance_runtime_path.exists(),
+        "modes_path": str(modes_path),
+        "modes_exists": modes_path.exists(),
     }
 
     try:
@@ -135,6 +156,113 @@ def health_check(workspace_root: Path, repo_root: Path, verbose: bool = False) -
 
 def _workspace_install_root_config_path(workspace_root: Path) -> Path:
     return workspace_root / ".pecs" / "config" / WORKSPACE_INSTALL_ROOT_CONFIG
+
+
+def _global_pecs_dir() -> Path:
+    return Path.home() / GLOBAL_PECS_DIRNAME
+
+
+def _global_pecs_config_path() -> Path:
+    return _global_pecs_dir() / GLOBAL_PECS_CONFIG
+
+
+def _global_runtime_registry_path() -> Path:
+    return _global_pecs_dir() / GLOBAL_RUNTIME_REGISTRY
+
+
+def _load_json_object(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def _default_governance_runtime_content() -> str:
+    return """# PECS Governance Runtime
+
+This file is optional runtime governance guidance loaded dynamically by clients.
+
+Principles:
+- PECS is observational continuity infrastructure.
+- PECS provides locality-authority evidence, not governance enforcement.
+- Retrieval is topology-first and ownership-aware.
+- Missing overlays must never hard-fail runtime startup.
+
+Hydration mode:
+- Dynamic discovery via ~/.pecs/runtime_registry.json
+- Graceful degradation when overlays are absent
+"""
+
+
+def _default_modes_content() -> str:
+    return """# PECS Operational Modes
+
+This file is optional and dynamically loaded by clients.
+
+Suggested operational modes:
+- exploratory
+- locality_authority
+- validation
+
+Rules:
+- Mode selection is advisory.
+- Runtime behavior remains deterministic and continuity-safe.
+- Missing modes overlay must not break runtime.
+"""
+
+
+def _ensure_global_runtime_registry(repo_root: Path) -> Dict[str, Any]:
+    global_dir = _global_pecs_dir()
+    global_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = _global_pecs_config_path()
+    config = _load_json_object(config_path)
+    pecs_root = str(config.get("pecs_root", "") or "").strip()
+    if not pecs_root:
+        config["pecs_root"] = str(repo_root.resolve())
+    config_path.write_text(
+        json.dumps(config, indent=2, ensure_ascii=True, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    registry_path = _global_runtime_registry_path()
+    registry = _load_json_object(registry_path)
+    if "governance_runtime" not in registry:
+        registry["governance_runtime"] = "/.pecs/GOVERNANCE_RUNTIME.md"
+    if "modes" not in registry:
+        registry["modes"] = "/.pecs/MODES.md"
+    priority = registry.get("retrieval_priority")
+    if not isinstance(priority, list) or not priority:
+        registry["retrieval_priority"] = list(DEFAULT_RETRIEVAL_PRIORITY)
+
+    registry_path.write_text(
+        json.dumps(registry, indent=2, ensure_ascii=True, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    governance_runtime_path = global_dir / "GOVERNANCE_RUNTIME.md"
+    if not governance_runtime_path.exists():
+        governance_runtime_path.write_text(
+            _default_governance_runtime_content(),
+            encoding="utf-8",
+        )
+
+    modes_path = global_dir / "MODES.md"
+    if not modes_path.exists():
+        modes_path.write_text(_default_modes_content(), encoding="utf-8")
+
+    return {
+        "global_pecs_dir": str(global_dir),
+        "config_path": str(config_path),
+        "runtime_registry_path": str(registry_path),
+        "governance_runtime_path": str(governance_runtime_path),
+        "modes_path": str(modes_path),
+    }
 
 
 def _workspace_registry_path(repo_root: Path) -> Path:
@@ -176,6 +304,26 @@ def _write_workspace_install_root(workspace_root: Path, repo_root: Path) -> None
         json.dumps(_discover_install_runtime_info(repo_root), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _read_workspace_install_root(workspace_root: Path) -> Optional[Path]:
+    config_path = _workspace_install_root_config_path(workspace_root)
+    if not config_path.exists():
+        return None
+
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    raw = str(data.get("install_root", "") or "").strip()
+    if not raw:
+        return None
+
+    return Path(raw).resolve()
 
 
 def register_workspace(repo_root: Path, workspace_root: Path) -> None:
@@ -224,6 +372,29 @@ def _read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
     return default
 
 
+def _sanitize_vscode_task_command(command: str) -> str:
+    return (
+        command
+        .replace("${{workspaceFolder}}", "${workspaceFolder}")
+        .replace("${{input:pecsChatSource}}", "${input:pecsChatSource}")
+        .replace("${{input:pecsChatMessage}}", "${input:pecsChatMessage}")
+    )
+
+
+def _sanitize_vscode_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(task, dict):
+        return task
+
+    if isinstance(task.get("command"), str):
+        task["command"] = _sanitize_vscode_task_command(task["command"])
+
+    windows = task.get("windows")
+    if isinstance(windows, dict) and isinstance(windows.get("command"), str):
+        windows["command"] = _sanitize_vscode_task_command(windows["command"])
+
+    return task
+
+
 def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
     base = _read_json(tasks_path, {"version": "2.0.0", "tasks": [], "inputs": []})
     tasks: List[Dict[str, Any]] = (
@@ -268,12 +439,17 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
             'bash -lc \'cd "${workspaceFolder}" '
             "&& if [[ -f .pecs/daemon.pid ]]; then "
             "pid=$(<.pecs/daemon.pid); "
+            "pid=\"${pid//\"/}\"; "
+            "pid=\"${pid//\'/}\"; "
+            "pid=\"${pid//$'\\r'/}\"; "
+            "pid=\"${pid//$'\\n'/}\"; "
+            "pid=\"${pid//[[:space:]]/}\"; "
             'if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then kill "$pid"; fi; '
             "fi'"
         ),
         "windows": {
             "command": (
-                'cd "${workspaceFolder}" && powershell.exe -NoProfile -Command "if (Test-Path \'.pecs/daemon.pid\') { $pid = Get-Content \'.pecs/daemon.pid\'; if ($pid -match \'^[0-9]+$\') { Stop-Process -Id $pid -ErrorAction SilentlyContinue } }"'
+                'cd "${workspaceFolder}" && powershell.exe -NoProfile -Command "if (Test-Path \'.pecs/daemon.pid\') { $pid = Get-Content \'.pecs/daemon.pid\' | Select-Object -First 1; $pid = $pid.Trim().Trim(\"\").Trim(\'\'); if ($pid -match \'^[0-9]+$\') { Stop-Process -Id $pid -ErrorAction SilentlyContinue } }"'
             )
         },
     }
@@ -283,7 +459,7 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
         "type": "shell",
         "command": (
             'bash -lc \'cd "${workspaceFolder}" '
-            '&& python3 .pecs/tools/append_ai_chat_history.py "${workspaceFolder}" '
+            '&& bash .pecs/tools/append_ai_chat_history.sh "${workspaceFolder}" '
             '--source "${input:pecsChatSource}" --message "${input:pecsChatMessage}"\''
         ),
         "windows": {
@@ -353,7 +529,7 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
     for task in desired_tasks:
         existing_by_label[task["label"]] = task
 
-    merged_tasks = list(existing_by_label.values())
+    merged_tasks = [_sanitize_vscode_task(task) for task in existing_by_label.values()]
 
     desired_inputs = [
         {
@@ -836,7 +1012,7 @@ print(f"PECS={shlex.quote(value)}")
 value = str(console.get("pecs-pro-daemon", "") or "")
 print(f"PECS_PRO_DAEMON={shlex.quote(value)}")
 PY
-  )"
+)"
   fi
   INSTALL_ROOT="${INSTALL_ROOT:-}"
   INSTALL_PYTHON="${PYTHON_PATH:-}"
@@ -892,7 +1068,7 @@ if (-not $python) { Write-Error "Python is not available on PATH"; exit 1 }
 
     bridge_config = {
         "schema": "pecs.bridge.config.v1",
-        "mode": "deterministic_continuity_stabilization",
+        "mode": "exploratory",
         "compare_before_write": True,
         "omit_empty_sections": True,
         "sparse_output": True,
@@ -1036,17 +1212,88 @@ fi
         common_loader
         + "\n"
         + "WORKSPACE_ROOT=\"${1:-.}\"\n"
-        + "if [[ -n \"$PECS_DAEMON_EXE\" && -x \"$PECS_DAEMON_EXE\" ]]; then\n"
-        + "  exec \"$PECS_DAEMON_EXE\" \"$WORKSPACE_ROOT\"\n"
+        + "WORKSPACE_ROOT=\"$(cd \"$WORKSPACE_ROOT\" && pwd)\"\n"
+        + "LOG_DIR=\"$WORKSPACE_ROOT/.pecs\"\n"
+        + "LOG_FILE=\"$LOG_DIR/daemon.log\"\n"
+        + "PID_FILE=\"$LOG_DIR/daemon.pid\"\n"
+        + "HEALTH_FILE=\"$LOG_DIR/daemon_health.json\"\n"
+        + "STARTUP_TIMEOUT=\"${PECS_DAEMON_STARTUP_TIMEOUT:-30}\"\n"
+        + "STARTUP_INTERVAL=\"${PECS_DAEMON_STARTUP_INTERVAL:-0.5}\"\n"
+        + "mkdir -p \"$LOG_DIR\"\n"
+        + "check_daemon_health() {\n"
+        + "  if [[ ! -f \"$HEALTH_FILE\" ]]; then\n"
+        + "    return 1\n"
+        + "  fi\n"
+        + "  if ! command -v \"$PYTHON_CMD\" >/dev/null 2>&1; then\n"
+        + "    return 1\n"
+        + "  fi\n"
+        + "  local status\n"
+        + "  status=\"$($PYTHON_CMD - \"$HEALTH_FILE\" <<'PY'\nfrom pathlib import Path\nimport json, sys\n\npath = Path(sys.argv[1])\ntry:\n    data = json.loads(path.read_text(encoding='utf-8'))\nexcept Exception:\n    sys.exit(1)\nif (\n    data.get('status') == 'healthy'\n    and data.get('retrieval_ready') is True\n    and data.get('topology_ready') is True\n    and data.get('continuity_ready') is True\n):\n    sys.stdout.write('healthy')\nPY\n)\"\n"
+        + "  [[ \"$status\" == \"healthy\" ]]\n"
+        + "}\n"
+        + "if [[ -f \"$PID_FILE\" ]]; then\n"
+        + "  pid=\"$(tr -d '\"[:space:]' < \"$PID_FILE\")\"\n"
+        + "  if [[ \"$pid\" =~ ^[0-9]+$ ]] && kill -0 \"$pid\" 2>/dev/null; then\n"
+        + "    echo \"PECS daemon is already running for workspace: $WORKSPACE_ROOT (pid=$pid)\"\n"
+        + "    exit 0\n"
+        + "  fi\n"
+        + "  rm -f \"$PID_FILE\"\n"
         + "fi\n"
-        + "if command -v pecs-pro-daemon >/dev/null 2>&1; then\n"
-        + "  exec pecs-pro-daemon \"$WORKSPACE_ROOT\"\n"
+        + "resolve_cmd() {\n"
+        + "  if [[ -n \"$PECS_DAEMON_EXE\" && -x \"$PECS_DAEMON_EXE\" ]]; then\n"
+        + "    echo \"$PECS_DAEMON_EXE\"\n"
+        + "    return 0\n"
+        + "  fi\n"
+        + "  if command -v pecs-pro-daemon >/dev/null 2>&1; then\n"
+        + "    echo \"pecs-pro-daemon\"\n"
+        + "    return 0\n"
+        + "  fi\n"
+        + "  if [[ -n \"$INSTALL_PYTHON\" && -x \"$INSTALL_PYTHON\" ]]; then\n"
+        + "    echo \"$INSTALL_PYTHON\"\n"
+        + "    return 0\n"
+        + "  fi\n"
+        + "  return 1\n"
+        + "}\n"
+        + "DAEMON_CMD=\"$(resolve_cmd)\"\n"
+        + "if [[ -z \"$DAEMON_CMD\" ]]; then\n"
+        + "  echo \"ERROR: Could not resolve PECS daemon runtime from install root or PATH.\" >&2\n"
+        + "  echo \"Expected install root: $INSTALL_ROOT\" >&2\n"
+        + "  exit 1\n"
         + "fi\n"
-        + "if [[ -n \"$INSTALL_PYTHON\" && -x \"$INSTALL_PYTHON\" ]]; then\n"
-        + "  exec \"$INSTALL_PYTHON\" -m run_pecs_daemon \"$WORKSPACE_ROOT\"\n"
+        + "if [[ \"$DAEMON_CMD\" == \"$INSTALL_PYTHON\" ]]; then\n"
+        + "  DAEMON_ARGS=(-m run_pecs_daemon \"$WORKSPACE_ROOT\")\n"
+        + "else\n"
+        + "  DAEMON_ARGS=(\"$WORKSPACE_ROOT\")\n"
         + "fi\n"
-        + "echo \"ERROR: Could not resolve PECS daemon runtime from install root or PATH.\" >&2\n"
-        + "echo \"Expected install root: $INSTALL_ROOT\" >&2\n"
+        + "cd \"$WORKSPACE_ROOT\"\n"
+        + "if command -v setsid >/dev/null 2>&1; then\n"
+        + "  setsid \"$DAEMON_CMD\" \"${DAEMON_ARGS[@]}\" >> \"$LOG_FILE\" 2>&1 &\n"
+        + "else\n"
+        + "  nohup \"$DAEMON_CMD\" \"${DAEMON_ARGS[@]}\" >> \"$LOG_FILE\" 2>&1 &\n"
+        + "fi\n"
+        + "launcher_pid=$!\n"
+        + "end_time=$(( $(date +%s) + STARTUP_TIMEOUT ))\n"
+        + "while [[ $(date +%s) -lt $end_time ]]; do\n"
+        + "  if [[ -f \"$PID_FILE\" ]]; then\n"
+        + "    pid=\"$(tr -d '\"[:space:]' < \"$PID_FILE\")\"\n"
+        + "    if [[ \"$pid\" =~ ^[0-9]+$ ]] && kill -0 \"$pid\" 2>/dev/null; then\n"
+        + "      echo \"Daemon started successfully (PID $pid)\"\n"
+        + "      exit 0\n"
+        + "    fi\n"
+        + "  fi\n"
+        + "  if ! kill -0 \"$launcher_pid\" 2>/dev/null; then\n"
+        + "    echo \"Daemon launcher process exited before startup. Check $LOG_FILE\" >&2\n"
+        + "    tail -n 20 \"$LOG_FILE\" >&2 || true\n"
+        + "    exit 1\n"
+        + "  fi\n"
+        + "  sleep \"$STARTUP_INTERVAL\"\n"
+        + "done\n"
+        + "echo \"Daemon startup timed out waiting for daemon readiness. See $LOG_FILE\" >&2\n"
+        + "tail -n 20 \"$LOG_FILE\" >&2 || true\n"
+        + "if [[ -f \"$HEALTH_FILE\" ]]; then\n"
+        + "  echo \"--- health artifact ---\" >&2\n"
+        + "  cat \"$HEALTH_FILE\" >&2 || true\n"
+        + "fi\n"
         + "exit 1\n"
         , encoding="utf-8"
     )
@@ -1090,28 +1337,13 @@ setlocal enabledelayedexpansion
 set WORKSPACE_ROOT=%~1
 if "%WORKSPACE_ROOT%"=="" set WORKSPACE_ROOT=.
 set SCRIPT_DIR=%~dp0
-set CONFIG_FILE=%SCRIPT_DIR%config\\install_root.json
-set INSTALL_ROOT=
-set INSTALL_PYTHON=
-set PECS_DAEMON_EXE=
-set IDX=0
-set PYTHON_EXEC=python
-where python >nul 2>&1 || set PYTHON_EXEC=py -3
-for /f "usebackq delims=" %%A in (`%PYTHON_EXEC% -c "import json,sys; p=sys.argv[1]; data=json.loads(open(p,encoding='utf-8').read()); print(data.get('install_root','')); print(data.get('python_path','')); print(data.get('console_scripts',{}).get('pecs','')); print(data.get('console_scripts',{}).get('pecs-pro-daemon',''))" "%CONFIG_FILE%"`) do (
-  set /a IDX+=1
-  if !IDX! EQU 1 set INSTALL_ROOT=%%A
-  if !IDX! EQU 2 set INSTALL_PYTHON=%%A
-  if !IDX! EQU 4 set PECS_DAEMON_EXE=%%A
-)
-if defined PECS_DAEMON_EXE if exist "%PECS_DAEMON_EXE%" (
-  "%PECS_DAEMON_EXE%" "%WORKSPACE_ROOT%"
+set LAUNCHER=%SCRIPT_DIR%run_pecs_daemon.ps1
+if exist "%LAUNCHER%" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%LAUNCHER%" "%WORKSPACE_ROOT%"
   goto :EOF
 )
-if defined INSTALL_PYTHON if exist "%INSTALL_PYTHON%" (
-  "%INSTALL_PYTHON%" -m run_pecs_daemon "%WORKSPACE_ROOT%"
-  goto :EOF
-)
-pecs-pro-daemon "%WORKSPACE_ROOT%"
+echo ERROR: Workspace daemon launcher missing: %LAUNCHER%
+exit /b 1
 """,
         encoding="utf-8",
     )
@@ -1150,29 +1382,108 @@ exit 1
     run_daemon_ps1 = launcher_dir / "run_pecs_daemon.ps1"
     run_daemon_ps1.write_text(
         """param([string]$WorkspaceRoot = ".")
+Set-StrictMode -Version Latest
+
+$WorkspacePath = Resolve-Path -Path $WorkspaceRoot -ErrorAction Stop
+$WorkspaceRoot = $WorkspacePath.Path
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$ConfigFile = Join-Path $ScriptDir "config" "install_root.json"
 $InstallRoot = $null
 $InstallPython = $null
-$PecsExe = $null
 $PecsDaemonExe = $null
-$ConfigFile = Join-Path $ScriptDir "config" "install_root.json"
+
 if (Test-Path $ConfigFile) {
   $data = Get-Content $ConfigFile -Raw | ConvertFrom-Json
   $InstallRoot = $data.install_root
   $InstallPython = $data.python_path
-  $PecsExe = $data.console_scripts.pecs
   $PecsDaemonExe = $data.console_scripts."pecs-pro-daemon"
 }
-if ($PecsDaemonExe -and (Test-Path $PecsDaemonExe)) {
-  & $PecsDaemonExe $WorkspaceRoot
-  exit $LASTEXITCODE
+
+$PecsRoot = Join-Path $WorkspaceRoot ".pecs"
+$LogFile = Join-Path $PecsRoot "daemon.log"
+$PidFile = Join-Path $PecsRoot "daemon.pid"
+$StartupTimeout = 10
+$StartupInterval = 0.5
+
+New-Item -ItemType Directory -Force -Path $PecsRoot | Out-Null
+
+function Normalize-Pid {
+    param([string]$RawPid)
+    if ($RawPid -eq $null) {
+      return $null
+    }
+    $value = $RawPid.Trim()
+    if ($value.StartsWith('"') -and $value.EndsWith('"')) {
+      $value = $value.Trim('"')
+    }
+    if ($value.StartsWith("'") -and $value.EndsWith("'")) {
+      $value = $value.Trim("'")
+    }
+    return $value
+  }
+
+  if (Test-Path $PidFile) {
+  try {
+    $pid = Normalize-Pid (Get-Content $PidFile | Select-Object -First 1)
+    if ($pid -match '^[0-9]+$' -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
+      Write-Host "PECS daemon is already running for workspace: $WorkspaceRoot (pid=$pid)"
+      exit 0
+    }
+  } catch {
+    # ignore stale PID file content
+  }
+  Remove-Item -Force -Path $PidFile -ErrorAction SilentlyContinue
 }
-if ($InstallPython -and (Test-Path $InstallPython)) {
-  & $InstallPython -m run_pecs_daemon $WorkspaceRoot
-  exit $LASTEXITCODE
+
+function Resolve-DaemonCommand {
+  if ($PecsDaemonExe -and (Test-Path $PecsDaemonExe)) {
+    return $PecsDaemonExe
+  }
+  if (Get-Command pecs-pro-daemon -ErrorAction SilentlyContinue) {
+    return (Get-Command pecs-pro-daemon).Source
+  }
+  if ($InstallPython -and (Test-Path $InstallPython)) {
+    return $InstallPython
+  }
+  return $null
 }
-Write-Error "ERROR: Could not resolve PECS daemon runtime from install root or PATH."
-Write-Error "Expected install root: $InstallRoot"
+
+$DaemonCmd = Resolve-DaemonCommand
+if (-not $DaemonCmd) {
+  Write-Error "ERROR: Could not resolve PECS daemon runtime from install root or PATH."
+  Write-Error "Expected install root: $InstallRoot"
+  exit 1
+}
+
+if ($DaemonCmd -eq $InstallPython) {
+  $ArgumentList = @('-m', 'run_pecs_daemon', $WorkspaceRoot)
+} else {
+  $ArgumentList = @($WorkspaceRoot)
+}
+
+$process = Start-Process -FilePath $DaemonCmd -ArgumentList $ArgumentList -RedirectStandardOutput $LogFile -RedirectStandardError $LogFile -NoNewWindow -WindowStyle Hidden -PassThru
+
+$endTime = (Get-Date).AddSeconds($StartupTimeout)
+while ((Get-Date) -lt $endTime) {
+  Start-Sleep -Seconds $StartupInterval
+  if (Test-Path $PidFile) {
+    try {
+      $pid = Normalize-Pid (Get-Content $PidFile | Select-Object -First 1)
+      if ($pid -match '^[0-9]+$' -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
+        Write-Host "Daemon started successfully (PID $pid)"
+        exit 0
+      }
+    } catch {
+      # continue waiting
+    }
+  }
+  if ($process.HasExited) {
+    Write-Error "Daemon process exited before startup. Check $LogFile"
+    exit $process.ExitCode
+  }
+}
+
+Write-Error "Daemon startup timed out waiting for .pecs/daemon.pid. See $LogFile"
 exit 1
 """,
         encoding="utf-8",
@@ -1252,6 +1563,7 @@ def _copy_manual_setup_guide(workspace_root: Path, repo_root: Path) -> None:
 
 
 def install_workspace(workspace_root: Path, repo_root: Path) -> None:
+    _ensure_global_runtime_registry(repo_root)
     _install_chat_tools(workspace_root, repo_root)
     _install_bridge_runtime(workspace_root, repo_root)
     _merge_tasks(workspace_root / ".vscode" / "tasks.json", repo_root)

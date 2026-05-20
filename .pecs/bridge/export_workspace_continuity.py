@@ -7,6 +7,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+try:
+    from continuity.confidence.confidence_model import ConfidenceModel
+except Exception:  # pragma: no cover - optional portability fallback
+    ConfidenceModel = None
+
+try:
+    from topology.archaeology.continuity_archaeology import ContinuityArchaeology
+except Exception:  # pragma: no cover - optional portability fallback
+    ContinuityArchaeology = None
+
 ARTIFACT_DIR = ".pecs"
 CONTINUITY_DIR = ".pecs/continuity"
 ACTIVE_TOPOLOGY_SCHEMA = "pecs.active_topology.v1"
@@ -157,11 +167,19 @@ def _resolve_runtime_touched_files(
 
 def _normalize_chat_history_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
+    persistence_tokens = (
+        "issue persists",
+        "same behavior",
+        "still broken",
+        "no effect",
+        "nothing changed",
+    )
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         message = str(entry.get("message", "") or "").strip()
-        if not message:
+        event_type = str(entry.get("event_type", "") or "").strip().lower()
+        if not message and not event_type:
             continue
         source = str(entry.get("source", "") or "").strip().lower()
         ts = entry.get("ts", 0)
@@ -169,7 +187,45 @@ def _normalize_chat_history_entries(entries: List[Dict[str, Any]]) -> List[Dict[
             ts = float(ts)
         except Exception:
             ts = 0.0
-        normalized.append({"source": source, "message": message, "ts": ts})
+        correlation = entry.get("correlation", {})
+        if not isinstance(correlation, dict):
+            correlation = {}
+
+        object_ids = correlation.get("object_ids", [])
+        error_ids = correlation.get("error_ids", [])
+        result_ids = correlation.get("result_ids", [])
+
+        if not isinstance(object_ids, list):
+            object_ids = [object_ids] if str(object_ids).strip() else []
+        if not isinstance(error_ids, list):
+            error_ids = [error_ids] if str(error_ids).strip() else []
+        if not isinstance(result_ids, list):
+            result_ids = [result_ids] if str(result_ids).strip() else []
+
+        object_ids = sorted({str(item).strip() for item in object_ids if str(item).strip()})
+        error_ids = sorted({str(item).strip() for item in error_ids if str(item).strip()})
+        result_ids = sorted({str(item).strip() for item in result_ids if str(item).strip()})
+
+        validation_outcome = str(correlation.get("validation_outcome", "") or "").strip().lower()
+        if validation_outcome not in {"accepted", "rejected", "regression", "unresolved", "observed", "unknown"}:
+            validation_outcome = "unknown"
+
+        lowered_message = message.lower()
+        persistence_signal = any(token in lowered_message for token in persistence_tokens)
+        normalized.append(
+            {
+                "source": source,
+                "message": message,
+                "event_type": event_type,
+                "correlation": correlation,
+                "ts": ts,
+                "persistence_signal": persistence_signal,
+                "object_ids": object_ids,
+                "error_ids": error_ids,
+                "result_ids": result_ids,
+                "validation_outcome": validation_outcome,
+            }
+        )
     normalized.sort(key=lambda item: (item["ts"], item["source"], item["message"]))
     return normalized
 
@@ -210,11 +266,110 @@ def _build_engineering_continuity_state(workspace_root: Path) -> Dict[str, Any]:
             "updated_at": "",
         }
 
+    class _FallbackArchaeology:
+        @staticmethod
+        def _clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+
+        def __init__(self) -> None:
+            self.locality_authority_history: Dict[str, List[Dict[str, object]]] = {}
+
+        def derive_locality_authority_evidence(self, **kwargs) -> Dict[str, object]:
+            attempted = str(kwargs.get("attempted_locality", "") or "")
+            candidate = kwargs.get("runtime_authority_candidate", None)
+            runtime_effect = kwargs.get("runtime_effect_confirmed", None)
+            persistence_count = int(kwargs.get("persistence_signal_count", 0) or 0)
+            unresolved = bool(persistence_count > 0 and runtime_effect is not True)
+            mismatch = bool(attempted and candidate and attempted != candidate)
+
+            duplicate_shadow = self._clamp(
+                0.18 * float(kwargs.get("duplicate_lineage_count", 0) or 0)
+                + 0.08 * persistence_count
+                + (0.22 if mismatch else 0.0)
+            )
+            dead_path = self._clamp(float(kwargs.get("dead_execution_path_signal", 0.0) or 0.0))
+            mismatch_score = self._clamp(
+                float(kwargs.get("topology_mismatch_signal", 0.0) or 0.0)
+                + (0.25 if mismatch else 0.0)
+            )
+
+            authority = self._clamp(
+                0.55
+                + (0.18 if runtime_effect is True else 0.0)
+                - (0.2 if unresolved else 0.0)
+                - duplicate_shadow * 0.18
+                - mismatch_score * 0.24
+            )
+            survivability = self._clamp(
+                0.5
+                + (0.15 if runtime_effect is True else 0.0)
+                - (0.2 if unresolved else 0.0)
+                - dead_path * 0.18
+            )
+
+            return {
+                "attempted_locality": attempted,
+                "runtime_authority_candidate": candidate,
+                "runtime_effect_confirmed": runtime_effect,
+                "unresolved_persistence": unresolved,
+                "duplicate_shadow_suspicion": round(duplicate_shadow, 3),
+                "dead_execution_path_suspicion": round(dead_path, 3),
+                "wrapper_only_mutation": bool(kwargs.get("wrapper_only_mutation", False)),
+                "topology_mismatch_suspicion": round(mismatch_score, 3),
+                "ownership_ambiguity": round(
+                    self._clamp(float(kwargs.get("ownership_ambiguity", 0.0) or 0.0)),
+                    3,
+                ),
+                "locality_authority_confidence": round(authority, 3),
+                "continuity_survivability_confidence": round(survivability, 3),
+                "runtime_activity_density": kwargs.get("runtime_activity_density", None),
+                "historical_retention_signal": kwargs.get("historical_retention_signal", None),
+                "persistence_signal_count": persistence_count,
+            }
+
+        def register_locality_authority_evidence(self, issue_id: str, evidence: Dict[str, object]) -> None:
+            self.locality_authority_history.setdefault(issue_id, []).append(dict(evidence))
+
+        def to_dict(self) -> Dict[str, object]:
+            return {"locality_authority_history": self.locality_authority_history}
+
+    class _FallbackConfidenceModel:
+        @staticmethod
+        def _clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+
+        def derive_locality_authority_confidence(self, **kwargs) -> Dict[str, float]:
+            locality = self._clamp(float(kwargs.get("locality_authority_confidence", 0.0) or 0.0))
+            duplicate_shadow = self._clamp(float(kwargs.get("duplicate_shadow_suspicion", 0.0) or 0.0))
+            runtime_confirmation = self._clamp(float(kwargs.get("runtime_confirmation_weight", 0.0) or 0.0))
+            survivability = self._clamp(float(kwargs.get("continuity_survivability_confidence", 0.0) or 0.0))
+            mismatch = self._clamp(float(kwargs.get("topology_mismatch_weight", 0.0) or 0.0))
+            score = self._clamp(
+                locality * 0.42
+                + runtime_confirmation * 0.22
+                + survivability * 0.28
+                - duplicate_shadow * 0.16
+                - mismatch * 0.18
+            )
+            return {
+                "locality_authority_confidence": round(score, 3),
+                "duplicate_shadow_probability": round(duplicate_shadow, 3),
+                "runtime_confirmation_weight": round(runtime_confirmation, 3),
+                "continuity_survivability_confidence": round(survivability, 3),
+                "topology_mismatch_weight": round(mismatch, 3),
+            }
+
+    archaeology = ContinuityArchaeology() if ContinuityArchaeology is not None else _FallbackArchaeology()
+    confidence_model = ConfidenceModel() if ConfidenceModel is not None else _FallbackConfidenceModel()
+
     chains: Dict[str, Dict[str, Any]] = {}
     source_counts: Dict[str, int] = {}
     for entry in entries:
         source = str(entry.get("source", "") or "unknown").lower()
         message = str(entry.get("message", "") or "")
+        correlation = entry.get("correlation", {})
+        if not isinstance(correlation, dict):
+            correlation = {}
         topic = _infer_engineering_continuity_topic(message)
         accepted_locality = _infer_engineering_continuity_locality(message)
 
@@ -234,6 +389,25 @@ def _build_engineering_continuity_state(workspace_root: Path) -> Dict[str, Any]:
                 "source_tags": [],
                 "event_count": 0,
                 "source_counts": {},
+                "attempted_locality": accepted_locality,
+                "runtime_authority_candidate": None,
+                "runtime_effect_confirmed": None,
+                "unresolved_persistence": False,
+                "duplicate_shadow_suspicion": 0.0,
+                "dead_execution_path_suspicion": 0.0,
+                "wrapper_only_mutation": False,
+                "topology_mismatch_suspicion": 0.0,
+                "ownership_ambiguity": 0.0,
+                "locality_authority_confidence": 0.0,
+                "continuity_survivability_confidence": 0.0,
+                "runtime_activity_density": None,
+                "historical_retention_signal": None,
+                "persistence_signal_count": 0,
+                "validation_accept_count": 0,
+                "validation_reject_count": 0,
+                "validation_regression_count": 0,
+                "validation_unresolved_count": 0,
+                "object_error_links": {},
             },
         )
         chain["event_count"] = int(chain.get("event_count", 0)) + 1
@@ -254,12 +428,160 @@ def _build_engineering_continuity_state(workspace_root: Path) -> Dict[str, Any]:
         chain["continuity_confidence"] = round(
             min(1.0, chain["continuity_strength"] + 0.08), 3
         )
+
+        attempted_locality = str(
+            correlation.get("attempted_locality", correlation.get("locality", accepted_locality))
+            or accepted_locality
+        )
+        runtime_authority_candidate = str(
+            correlation.get("runtime_authority_candidate", accepted_locality) or accepted_locality
+        )
+
+        runtime_effect_confirmed_raw = correlation.get("runtime_effect_confirmed", None)
+        if runtime_effect_confirmed_raw is None:
+            runtime_effect_confirmed_raw = correlation.get("runtime_confirmation_signal", None)
+        runtime_effect_confirmed = (
+            bool(runtime_effect_confirmed_raw)
+            if runtime_effect_confirmed_raw is not None
+            else None
+        )
+
+        if bool(entry.get("persistence_signal", False)):
+            chain["persistence_signal_count"] = int(chain.get("persistence_signal_count", 0)) + 1
+
+        if bool(correlation.get("unresolved_persistence", False)):
+            chain["persistence_signal_count"] = int(chain.get("persistence_signal_count", 0)) + 1
+
+        validation_outcome = str(entry.get("validation_outcome", "unknown") or "unknown")
+        if validation_outcome == "accepted":
+            chain["validation_accept_count"] = int(chain.get("validation_accept_count", 0)) + 1
+        elif validation_outcome == "rejected":
+            chain["validation_reject_count"] = int(chain.get("validation_reject_count", 0)) + 1
+        elif validation_outcome == "regression":
+            chain["validation_regression_count"] = int(chain.get("validation_regression_count", 0)) + 1
+        elif validation_outcome == "unresolved":
+            chain["validation_unresolved_count"] = int(chain.get("validation_unresolved_count", 0)) + 1
+
+        object_ids = entry.get("object_ids", []) if isinstance(entry.get("object_ids", []), list) else []
+        error_ids = entry.get("error_ids", []) if isinstance(entry.get("error_ids", []), list) else []
+        link_counts = chain.get("object_error_links", {}) if isinstance(chain.get("object_error_links", {}), dict) else {}
+        for object_id in object_ids:
+            for error_id in error_ids or ["UNSPECIFIED_ERROR"]:
+                link_key = f"{object_id}::{error_id}"
+                link_counts[link_key] = int(link_counts.get(link_key, 0)) + 1
+        chain["object_error_links"] = link_counts
+
+        persistence_signal_count = int(chain.get("persistence_signal_count", 0))
+        duplicate_shadow = float(correlation.get("duplicate_shadow_suspicion", 0.0) or 0.0)
+        dead_path = float(correlation.get("dead_execution_path_suspicion", 0.0) or 0.0)
+        topology_mismatch = float(correlation.get("topology_mismatch_suspicion", 0.0) or 0.0)
+        ownership_ambiguity = float(correlation.get("ownership_ambiguity", 0.0) or 0.0)
+        runtime_activity_density = correlation.get("runtime_activity_density", None)
+        historical_retention_signal = correlation.get("historical_retention_signal", None)
+        wrapper_only_mutation = bool(correlation.get("wrapper_only_mutation", False))
+
+        derived_evidence = archaeology.derive_locality_authority_evidence(
+            attempted_locality=attempted_locality,
+            runtime_authority_candidate=runtime_authority_candidate,
+            runtime_effect_confirmed=runtime_effect_confirmed,
+            persistence_signal_count=persistence_signal_count,
+            duplicate_lineage_count=1 if duplicate_shadow > 0.5 else 0,
+            wrapper_only_mutation=wrapper_only_mutation,
+            ownership_ambiguity=ownership_ambiguity,
+            topology_mismatch_signal=topology_mismatch,
+            dead_execution_path_signal=dead_path,
+            runtime_activity_density=runtime_activity_density,
+            historical_retention_signal=historical_retention_signal,
+        )
+
+        derived_confidence = confidence_model.derive_locality_authority_confidence(
+            locality_authority_confidence=float(
+                derived_evidence.get("locality_authority_confidence", 0.0)
+            ),
+            duplicate_shadow_suspicion=float(
+                derived_evidence.get("duplicate_shadow_suspicion", 0.0)
+            ),
+            runtime_confirmation_weight=(
+                1.0 if runtime_effect_confirmed is True else 0.0
+            ),
+            continuity_survivability_confidence=float(
+                derived_evidence.get("continuity_survivability_confidence", 0.0)
+            ),
+            topology_mismatch_weight=float(
+                derived_evidence.get("topology_mismatch_suspicion", 0.0)
+            ),
+            dead_execution_path_suspicion=float(
+                derived_evidence.get("dead_execution_path_suspicion", 0.0)
+            ),
+            persistence_signal_count=persistence_signal_count,
+            runtime_activity_density=derived_evidence.get("runtime_activity_density", None),
+        )
+
+        chain["attempted_locality"] = attempted_locality
+        chain["runtime_authority_candidate"] = runtime_authority_candidate
+        chain["runtime_effect_confirmed"] = runtime_effect_confirmed
+        chain["unresolved_persistence"] = bool(
+            derived_evidence.get("unresolved_persistence", False)
+        )
+        chain["duplicate_shadow_suspicion"] = float(
+            max(
+                chain.get("duplicate_shadow_suspicion", 0.0),
+                derived_evidence.get("duplicate_shadow_suspicion", 0.0),
+            )
+        )
+        chain["dead_execution_path_suspicion"] = float(
+            max(
+                chain.get("dead_execution_path_suspicion", 0.0),
+                derived_evidence.get("dead_execution_path_suspicion", 0.0),
+            )
+        )
+        chain["wrapper_only_mutation"] = bool(
+            chain.get("wrapper_only_mutation", False) or wrapper_only_mutation
+        )
+        chain["topology_mismatch_suspicion"] = float(
+            max(
+                chain.get("topology_mismatch_suspicion", 0.0),
+                derived_evidence.get("topology_mismatch_suspicion", 0.0),
+            )
+        )
+        chain["ownership_ambiguity"] = float(
+            max(
+                chain.get("ownership_ambiguity", 0.0),
+                derived_evidence.get("ownership_ambiguity", 0.0),
+            )
+        )
+        chain["locality_authority_confidence"] = float(
+            max(
+                chain.get("locality_authority_confidence", 0.0),
+                derived_confidence.get("locality_authority_confidence", 0.0),
+            )
+        )
+        chain["continuity_survivability_confidence"] = float(
+            max(
+                chain.get("continuity_survivability_confidence", 0.0),
+                derived_confidence.get("continuity_survivability_confidence", 0.0),
+            )
+        )
+        chain["runtime_activity_density"] = derived_evidence.get(
+            "runtime_activity_density", None
+        )
+        chain["historical_retention_signal"] = derived_evidence.get(
+            "historical_retention_signal", None
+        )
+
+        archaeology.register_locality_authority_evidence(topic, derived_evidence)
+
         if "continue" in source and "copilot" in chain["source_tags"]:
             chain["continuity_outcome"] = "merged_cross_client_guidance"
         elif topic == "continuity_hydration":
             chain["continuity_outcome"] = "hydrated"
         else:
             chain["continuity_outcome"] = "accepted"
+
+        if int(chain.get("validation_regression_count", 0)) > 0:
+            chain["continuity_outcome"] = "regression"
+        elif int(chain.get("validation_unresolved_count", 0)) > 0 and int(chain.get("validation_accept_count", 0)) == 0:
+            chain["continuity_outcome"] = "unresolved"
 
     chains_list = list(chains.values())
     chains_list.sort(
@@ -269,6 +591,7 @@ def _build_engineering_continuity_state(workspace_root: Path) -> Dict[str, Any]:
     return {
         "schema": ENGINEERING_CONTINUITY_SCHEMA,
         "active_engineering_chains": chains_list,
+        "locality_authority_archaeology": archaeology.to_dict(),
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
 

@@ -28,3 +28,4 @@ __pycache__/
 .pecs/backups/
 *.egg-info/
 .pecs_workspaces.json
+.DS_Store

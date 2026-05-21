@@ -1,3 +1,29 @@
+
+# ⚠ Active Runtime Validation Branch
+
+Current live PECS runtime testing and observability validation are occurring on:
+
+`pecs-runtime-observability-stable`
+
+The `main` branch is currently not the primary branch for active runtime continuity validation, daemon observability testing, or AI workflow propagation experiments.
+
+For current PECS runtime behavior, continuity propagation testing, and observability instrumentation, use the active validation branch instead.
+
+## Current Validation Scope
+
+The active validation branch currently contains:
+- daemon observability instrumentation
+- runtime trigger-chain tracing
+- continuity projection diagnostics
+- AI continuity extraction validation
+- bridge refresh tracing
+- structured JSONL runtime logs
+
+Operational validation is still ongoing.
+Semantic continuity effectiveness and downstream AI behavioral influence are still under evaluation.
+
+---
+
 # PECS-PRO
 
 ## Branch Guidance

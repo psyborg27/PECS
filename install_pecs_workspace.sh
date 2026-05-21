@@ -3,33 +3,193 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="${1:-}"
+OLD_IFS="$IFS"
+ORIG_STTY=""
+DEBUG_INSTALL="${DEBUG_INSTALL:-0}"
 
 function error_exit() {
   echo "ERROR: $1" >&2
   echo "Copy the full error output, include OS/version, branch name, and report the issue on GitHub." >&2
+  restore_terminal_state
   exit 1
 }
 
-function prompt_workspace_root() {
-  while true; do
-    if [[ -z "$WORKSPACE_ROOT" ]]; then
-      read -r -p "Enter the target workspace root path: " WORKSPACE_ROOT
+function restore_terminal_state() {
+  if [[ -t 0 ]]; then
+    stty sane >/dev/null 2>&1 || true
+    if [[ -n "${ORIG_STTY:-}" ]]; then
+      stty "$ORIG_STTY" >/dev/null 2>&1 || true
     fi
+  fi
+}
+
+function cleanup() {
+  local exit_code=$?
+  IFS="$OLD_IFS"
+  restore_terminal_state
+  return $exit_code
+}
+
+function handle_interrupt() {
+  echo "\nInstaller interrupted by user." >&2
+  restore_terminal_state
+  exit 1
+}
+
+function handle_suspend() {
+  restore_terminal_state
+  trap - TSTP
+  kill -TSTP "$$"
+}
+
+function handle_continue() {
+  save_terminal_state
+}
+
+trap handle_interrupt INT TERM
+trap handle_suspend TSTP
+trap handle_continue CONT
+trap cleanup EXIT
+
+function save_terminal_state() {
+  if [[ -t 0 ]]; then
+    ORIG_STTY="$(stty -g 2>/dev/null || true)"
+  fi
+}
+
+function normalize_workspace_path() {
+  local raw="$1"
+  local normalized="$raw"
+
+  # Trim leading/trailing whitespace
+  normalized="${normalized#${normalized%%[![:space:]]*}}"
+  normalized="${normalized%${normalized##*[![:space:]]}}"
+
+  # Remove surrounding quotes if present
+  if [[ "${normalized:0:1}" == '"' && "${normalized: -1}" == '"' ]] || \
+     [[ "${normalized:0:1}" == "'" && "${normalized: -1}" == "'" ]]; then
+    normalized="${normalized:1:-1}"
+  fi
+
+  # Unescape escaped spaces for shell-style paths
+  normalized="${normalized//\\ / }"
+
+  # Expand tilde at the beginning of the path
+  if [[ "$normalized" == "~" ]] || [[ "$normalized" == ~/* ]]; then
+    normalized="${HOME}${normalized:1}"
+  fi
+
+  # Normalize trailing slashes except root
+  if [[ "$normalized" != "/" ]]; then
+    while [[ "$normalized" == */ ]]; do
+      normalized="${normalized%/}"
+    done
+  fi
+
+  printf '%s' "$normalized"
+}
+
+function log_path_diagnostics() {
+  local raw="$1"
+  local normalized="$2"
+  local expanded="$3"
+  local exists="$4"
+
+  printf 'RAW INPUT: %s\n' "$raw" >&2
+  printf 'NORMALIZED PATH: %s\n' "$normalized" >&2
+  printf 'EXPANDED PATH: %s\n' "$expanded" >&2
+  printf 'DIRECTORY EXISTS: %s\n' "$exists" >&2
+}
+
+function prompt_workspace_root() {
+  save_terminal_state
+  local prompt_message="Enter the target workspace root path"
+  local previous_input=""
+  local retries=0
+  local max_retries=3
+
+  while true; do
+    if [[ -n "$WORKSPACE_ROOT" ]]; then
+      previous_input="$WORKSPACE_ROOT"
+    fi
+
+    echo "Valid examples: '/Users/raj/Downloads/auto OCR app'  \"/Users/raj/Downloads/auto OCR app\"  ~/Downloads/auto OCR app" >&2
+    if [[ -n "$previous_input" ]]; then
+      echo "Previous entry: $previous_input" >&2
+    fi
+
+    local read_status=0
+    if [[ -n "${BASH_VERSION:-}" ]] && [[ "${BASH_VERSINFO[0]:-0}" -ge 4 ]]; then
+      read -r -e -i "$previous_input" -p "$prompt_message: " WORKSPACE_ROOT
+      read_status=$?
+    elif [[ -n "${BASH_VERSION:-}" ]]; then
+      read -r -e -p "$prompt_message: " WORKSPACE_ROOT
+      read_status=$?
+    else
+      printf '%s: ' "$prompt_message"
+      IFS= read -r WORKSPACE_ROOT
+      read_status=$?
+    fi
+
+    if [[ $read_status -ne 0 || -z "$WORKSPACE_ROOT" ]]; then
+      if [[ $read_status -ne 0 ]]; then
+        restore_terminal_state
+        echo "\nInstaller cancelled by user." >&2
+        exit 1
+      fi
+      echo "Workspace path is required." >&2
+      previous_input=""
+      retries=$((retries + 1))
+      if [[ $retries -ge $max_retries ]]; then
+        echo "Workspace path was invalid too many times. Terminating installer." >&2
+        exit 1
+      fi
+      continue
+    fi
+
+    if [[ "$WORKSPACE_ROOT" == *$'\e'* ]]; then
+      restore_terminal_state
+      echo "\nInstaller cancelled by user." >&2
+      exit 1
+    fi
+
+    local raw_input="$WORKSPACE_ROOT"
+    local normalized_input
+    normalized_input="$(normalize_workspace_path "$raw_input")"
+    WORKSPACE_ROOT="$normalized_input"
 
     if [[ -z "$WORKSPACE_ROOT" ]]; then
       echo "Workspace path is required." >&2
+      previous_input="$raw_input"
+      retries=$((retries + 1))
+      if [[ $retries -ge $max_retries ]]; then
+        echo "Workspace path was invalid too many times. Terminating installer." >&2
+        exit 1
+      fi
       continue
     fi
 
     if [[ ! -d "$WORKSPACE_ROOT" ]]; then
+      log_path_diagnostics "$raw_input" "$WORKSPACE_ROOT" "$WORKSPACE_ROOT" false
       echo "Workspace path does not exist: $WORKSPACE_ROOT" >&2
-      WORKSPACE_ROOT=""
+      previous_input="$raw_input"
+      retries=$((retries + 1))
+      if [[ $retries -ge $max_retries ]]; then
+        echo "Workspace path was invalid too many times. Terminating installer." >&2
+        exit 1
+      fi
       continue
     fi
 
     if [[ ! -w "$WORKSPACE_ROOT" ]]; then
+      log_path_diagnostics "$raw_input" "$WORKSPACE_ROOT" "$WORKSPACE_ROOT" false
       echo "Workspace path is not writable: $WORKSPACE_ROOT" >&2
-      WORKSPACE_ROOT=""
+      previous_input="$raw_input"
+      retries=$((retries + 1))
+      if [[ $retries -ge $max_retries ]]; then
+        echo "Workspace path was invalid too many times. Terminating installer." >&2
+        exit 1
+      fi
       continue
     fi
 

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import importlib.metadata
 import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -88,9 +92,17 @@ class WorkspaceContinuityDaemon:
     pid_file_name: str = "daemon.pid"
     cycle_lock_name: str = "daemon.lock"
     cycle_lock_ttl_seconds: int = 180
+    continuity_refresh_throttle_seconds: int = 60
+    max_log_bytes: int = 262144
+    log_backup_count: int = 3
 
     workspace_id: str = field(init=False)
     runtime_reachable_files: Set[Path] = field(default_factory=set, init=False)
+    log_dir: Path = field(init=False)
+    activity_log_path: Path = field(init=False)
+    continuity_log_path: Path = field(init=False)
+    error_log_path: Path = field(init=False)
+    _last_chat_event_ts: Optional[float] = field(default=None, init=False)
     runtime_locality_payload: Dict[str, Dict[str, object]] = field(
         default_factory=dict, init=False
     )
@@ -99,12 +111,15 @@ class WorkspaceContinuityDaemon:
     )
     _start_timestamp: Optional[float] = field(default=None, init=False)
     _last_rebuild_timestamp: Optional[float] = field(default=None, init=False)
+    _last_continuity_refresh_timestamp: Optional[float] = field(default=None, init=False)
+    _last_continuity_refresh_status: str = field(default="", init=False)
     _cycle_lock_owned: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.resolve()
         self.artifact_dir = self.workspace_root / self.artifact_dir_name
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        self._init_observability()
         self.runtime_activation_logger = RuntimeActivationLogger(self.artifact_dir)
         self.locality_activation_engine = LocalityActivationEngine(
             self.runtime_activation_logger
@@ -123,6 +138,70 @@ class WorkspaceContinuityDaemon:
         self.workspace_id = hashlib.sha256(
             str(self.workspace_root).encode("utf-8")
         ).hexdigest()
+
+    def _init_observability(self) -> None:
+        self.log_dir = self.artifact_dir / "logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.activity_log_path = self.log_dir / "daemon_activity.log"
+        self.continuity_log_path = self.log_dir / "continuity_sync.log"
+        self.error_log_path = self.log_dir / "daemon_errors.log"
+        self._log_activity(
+            "daemon_initialized",
+            {
+                "workspace_root": str(self.workspace_root),
+                "artifact_dir": str(self.artifact_dir),
+            },
+        )
+
+    def _current_iso_ts(self) -> str:
+        return datetime.utcnow().isoformat() + "Z"
+
+    def _rotate_log(self, path: Path) -> None:
+        try:
+            if not path.exists() or path.stat().st_size <= self.max_log_bytes:
+                return
+
+            for index in range(self.log_backup_count - 1, 0, -1):
+                source = self.log_dir / f"{path.name}.{index}"
+                target = self.log_dir / f"{path.name}.{index + 1}"
+                if source.exists():
+                    source.replace(target)
+
+            rotated = self.log_dir / f"{path.name}.1"
+            path.replace(rotated)
+        except Exception:
+            pass
+
+    def _write_observability_line(self, path: Path, payload: Dict[str, Any]) -> None:
+        payload_with_metadata = {
+            "ts": self._current_iso_ts(),
+            "event": payload.get("event", "unknown"),
+            "details": payload.get("details", {}),
+        }
+        try:
+            self._rotate_log(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload_with_metadata, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    def _log_activity(self, event: str, details: Optional[Dict[str, Any]] = None) -> None:
+        self._write_observability_line(
+            self.activity_log_path,
+            {"event": event, "details": details or {}},
+        )
+
+    def _log_continuity(self, event: str, details: Optional[Dict[str, Any]] = None) -> None:
+        self._write_observability_line(
+            self.continuity_log_path,
+            {"event": event, "details": details or {}},
+        )
+
+    def _log_error(self, event: str, details: Optional[Dict[str, Any]] = None) -> None:
+        self._write_observability_line(
+            self.error_log_path,
+            {"event": event, "details": details or {}},
+        )
 
     def _workspace_metadata(self) -> Dict[str, str]:
         return {
@@ -159,6 +238,12 @@ class WorkspaceContinuityDaemon:
             self._run_cycle_locked(
                 cycle_name="startup_topology_bootstrap",
                 operation=lambda: self._rebuild_runtime_topology(),
+            )
+
+        if self.runtime_locality_payload:
+            self._run_continuity_refresh(
+                trigger="startup",
+                reason="daemon startup full scan or topology bootstrap",
             )
 
         self._append_system_chat_event(
@@ -283,6 +368,13 @@ class WorkspaceContinuityDaemon:
     def _record_change(self, file_path: Path) -> None:
         file_path = file_path.resolve()
         self.current_changes.add(file_path)
+        try:
+            self._log_activity(
+                "file_change_detected",
+                {"path": str(file_path.relative_to(self.workspace_root))},
+            )
+        except Exception:
+            pass
         self._process_changes()
 
     def _process_changes(self) -> None:
@@ -298,23 +390,42 @@ class WorkspaceContinuityDaemon:
         changed_files = sorted(self.current_changes)
         self.current_changes.clear()
 
-        if self._chat_history_path in changed_files:
-            self._on_chat_history_update_unlocked()
+        try:
+            if self._chat_history_path in changed_files:
+                self._on_chat_history_update_unlocked()
 
-        if self.runtime_activation_logger.event_path in changed_files:
-            self._on_activation_update()
+            if self.runtime_activation_logger.event_path in changed_files:
+                self._on_activation_update()
 
-        python_changed_files = [p for p in changed_files if p.suffix == ".py"]
-        if not python_changed_files:
-            return
+            python_changed_files = [p for p in changed_files if p.suffix == ".py"]
+            if not python_changed_files:
+                return
 
-        # Rebuild from runtime topology roots (entrypoints), not filesystem-wide inventory.
-        self._rebuild_runtime_topology(changed_files=python_changed_files)
+            # Rebuild from runtime topology roots (entrypoints), not filesystem-wide inventory.
+            self._rebuild_runtime_topology(changed_files=python_changed_files)
+        except Exception as exc:
+            self._log_error(
+                "incremental_sync_failed",
+                {
+                    "changed_files": [str(p.relative_to(self.workspace_root)) for p in changed_files],
+                    "error": str(exc),
+                },
+            )
+            raise
 
     def _rebuild_runtime_topology(
         self,
         changed_files: Optional[List[Path]] = None,
     ) -> None:
+        self._log_activity(
+            "topology_rebuild_started",
+            {
+                "changed_files": [
+                    str(path.relative_to(self.workspace_root))
+                    for path in (changed_files or [])
+                ],
+            },
+        )
         entrypoints = self._discover_entrypoints()
         reachable_files = self._resolve_runtime_reachable_files(entrypoints)
         self._populate_runtime_indexes(reachable_files)
@@ -360,6 +471,52 @@ class WorkspaceContinuityDaemon:
         self._last_rebuild_timestamp = time.time()
         self._write_health_state()
 
+        self._log_continuity(
+            "projection_refresh_started",
+            {
+                "trigger": "runtime_topology",
+                "reachable_files": len(self.runtime_reachable_files),
+                "edge_count": len(self.runtime_topology_edges),
+            },
+        )
+        self._log_continuity(
+            "topology_compact_refreshed",
+            {"edge_count": len(self.runtime_topology_edges)},
+        )
+        self._log_continuity(
+            "locality_index_refreshed",
+            {"payload_count": len(self.runtime_locality_payload)},
+        )
+        self._log_continuity(
+            "compact_bundle_refreshed",
+            {"context_count": len(compact_bundle.get("bundle", []))},
+        )
+        self._log_continuity(
+            "active_context_refreshed",
+            {
+                "activated_objects": len(
+                    active_context.get("activated_objects", [])
+                ),
+            },
+        )
+        self._log_continuity(
+            "projection_refresh_completed",
+            {"trigger": "runtime_topology"},
+        )
+        self._log_activity(
+            "topology_rebuild_completed",
+            {
+                "runtime_reachable_files": len(self.runtime_reachable_files),
+                "topology_edge_count": len(self.runtime_topology_edges),
+            },
+        )
+
+        if self.runtime_locality_payload:
+            self._run_continuity_refresh(
+                trigger="runtime_topology",
+                reason="runtime topology rebuild",
+            )
+
     def _discover_entrypoints(self) -> List[Path]:
         entrypoints: List[Path] = []
         for relative in ENTRYPOINT_CANDIDATES:
@@ -387,6 +544,7 @@ class WorkspaceContinuityDaemon:
 
     def _resolve_runtime_reachable_files(self, entrypoints: List[Path]) -> Set[Path]:
         reachable: Set[Path] = set()
+        excluded_paths: Set[str] = set()
         queue: Deque[Path] = deque(entrypoints)
 
         while queue:
@@ -397,6 +555,7 @@ class WorkspaceContinuityDaemon:
             if not path.exists() or path.suffix != ".py":
                 continue
             if self._is_hard_excluded(path):
+                excluded_paths.add(str(path.relative_to(self.workspace_root)))
                 continue
 
             reachable.add(path)
@@ -404,6 +563,15 @@ class WorkspaceContinuityDaemon:
             for target in self._extract_local_import_targets(path):
                 if target not in reachable:
                     queue.append(target)
+
+        if excluded_paths:
+            self._log_continuity(
+                "workspace_filter_applied",
+                {
+                    "excluded_path_count": len(excluded_paths),
+                    "example_excluded_paths": sorted(list(excluded_paths))[:8],
+                },
+            )
 
         return reachable
 
@@ -810,7 +978,22 @@ class WorkspaceContinuityDaemon:
 
     def _on_activation_update(self) -> None:
         if not self.runtime_locality_payload:
+            self._log_continuity(
+                "projection_skipped",
+                {"reason": "runtime_locality_payload_missing"},
+            )
             return
+
+        self._log_activity(
+            "runtime_activation_detected",
+            {
+                "event_path": str(
+                    self.runtime_activation_logger.event_path.relative_to(
+                        self.workspace_root
+                    )
+                ),
+            },
+        )
 
         focus = self._infer_active_focus_from_chat()
         activation = self._infer_locality_activation(focus)
@@ -820,6 +1003,26 @@ class WorkspaceContinuityDaemon:
         )
         self._write_json("compact_bundle.json", compact_bundle)
         self._write_json("active_context.json", active_context)
+        self._log_continuity(
+            "projection_refresh_started",
+            {"trigger": "runtime_activation"},
+        )
+        self._log_continuity(
+            "compact_bundle_refreshed",
+            {"context_count": len(compact_bundle.get("bundle", []))},
+        )
+        self._log_continuity(
+            "active_context_refreshed",
+            {"activated_objects": len(active_context.get("activated_objects", []))},
+        )
+        self._log_continuity(
+            "projection_refresh_completed",
+            {"trigger": "runtime_activation"},
+        )
+        self._run_continuity_refresh(
+            trigger="runtime_activation",
+            reason="runtime activation update",
+        )
 
     def _write_runtime_topology_snapshot(self, activation: Dict[str, object]) -> None:
         snapshot_path = self.runtime_snapshot_dir / "latest_snapshot.json"
@@ -831,6 +1034,131 @@ class WorkspaceContinuityDaemon:
             "runtime_edges": [edge for edge in self.runtime_topology_edges[:80]],
         }
         self._write_json_path(snapshot_path, snapshot)
+
+    def _should_run_continuity_refresh(self) -> bool:
+        now = time.time()
+        if self._last_continuity_refresh_timestamp is None:
+            return True
+        return (
+            now - self._last_continuity_refresh_timestamp
+            >= float(self.continuity_refresh_throttle_seconds)
+        )
+
+    def _run_continuity_refresh(self, trigger: str, reason: str) -> None:
+        if not self.runtime_locality_payload:
+            self._log_continuity(
+                "projection_skipped",
+                {"reason": "runtime_locality_payload_missing", "trigger": trigger},
+            )
+            return
+
+        if not self._should_run_continuity_refresh():
+            self._log_continuity(
+                "projection_skipped",
+                {"reason": "throttled", "trigger": trigger},
+            )
+            return
+
+        self._log_activity(
+            "continuity_refresh_started",
+            {"trigger": trigger, "reason": reason},
+        )
+        LOG.info(
+            "Starting continuity refresh: trigger=%s reason=%s",
+            trigger,
+            reason,
+        )
+
+        refresh_state = {
+            "trigger": trigger,
+            "reason": reason,
+            "started_at": time.time(),
+            "status": "pending",
+        }
+        self._write_json("continuity_refresh_state.json", refresh_state)
+
+        try:
+            self._execute_bridge_refresh()
+            self._last_continuity_refresh_timestamp = time.time()
+            self._last_continuity_refresh_status = "success"
+            refresh_state["status"] = "success"
+            refresh_state["completed_at"] = self._last_continuity_refresh_timestamp
+            self._log_activity(
+                "continuity_refresh_completed",
+                {"trigger": trigger, "status": "success"},
+            )
+            LOG.info("Continuity refresh succeeded: trigger=%s", trigger)
+        except Exception as exc:
+            self._last_continuity_refresh_timestamp = time.time()
+            self._last_continuity_refresh_status = "failed"
+            refresh_state["status"] = "failed"
+            refresh_state["completed_at"] = self._last_continuity_refresh_timestamp
+            refresh_state["error"] = str(exc)
+            self._log_error(
+                "bridge_execution_failed",
+                {"trigger": trigger, "reason": reason, "error": str(exc)},
+            )
+            LOG.warning(
+                "Continuity refresh failed: trigger=%s reason=%s error=%s",
+                trigger,
+                reason,
+                exc,
+            )
+        finally:
+            self._write_json("continuity_refresh_state.json", refresh_state)
+
+    def _execute_bridge_refresh(self) -> None:
+        run_bridge_sh = self.artifact_dir / "bridge" / "run_bridge.sh"
+        run_bridge_py = self.artifact_dir / "bridge" / "run_bridge.py"
+        if run_bridge_sh.exists() and os.access(run_bridge_sh, os.X_OK):
+            cmd = [str(run_bridge_sh), str(self.workspace_root), "refresh"]
+        elif run_bridge_py.exists():
+            cmd = [
+                sys.executable,
+                str(run_bridge_py),
+                "refresh",
+                "--workspace",
+                str(self.workspace_root),
+            ]
+        else:
+            error_payload = {
+                "workspace_root": str(self.workspace_root),
+                "bridge_dir": str(self.artifact_dir / "bridge"),
+            }
+            self._log_error("bridge_execution_failed", error_payload)
+            raise FileNotFoundError(
+                "No bridge refresh command available: expected run_bridge.sh or run_bridge.py"
+            )
+
+        result = subprocess.run(
+            cmd,
+            cwd=str(self.workspace_root),
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+
+        if result.returncode != 0:
+            error_details = {
+                "cmd": cmd,
+                "return_code": result.returncode,
+                "stderr": result.stderr.strip(),
+                "stdout": result.stdout.strip(),
+            }
+            self._log_error("bridge_execution_failed", error_details)
+            LOG.warning(
+                "Bridge refresh stderr: %s",
+                result.stderr.strip(),
+            )
+            raise RuntimeError(
+                f"Bridge refresh failed with exit code {result.returncode}"
+            )
+
+        self._log_activity(
+            "bridge_execution_succeeded",
+            {"cmd": cmd, "stdout": result.stdout.strip()},
+        )
+        LOG.info("Bridge refresh stdout: %s", result.stdout.strip())
 
     def _build_compact_bundle(
         self,
@@ -1038,20 +1366,91 @@ class WorkspaceContinuityDaemon:
             )
         except Exception as exc:
             LOG.warning("Failed to load ai_chat_history.json: %s", exc)
-
-        # Refresh only compact artifacts from chat focus without widening topology.
-        if self.runtime_locality_payload:
-            focus = self._infer_active_focus_from_chat()
-            activation = self._infer_locality_activation(focus)
-            compact_bundle = self._build_compact_bundle(focus, activation)
-            active_context = self._build_active_context_payload(
-                focus, compact_bundle, activation
+            self._log_error(
+                "continuity_extraction_failed",
+                {"error": str(exc)},
             )
-            self._write_json("compact_bundle.json", compact_bundle)
-            self._write_json("active_context.json", active_context)
 
         if isinstance(chat_data, list):
+            chat_entry_count = len(chat_data)
+            latest_event = chat_data[-1] if chat_entry_count > 0 else {}
+            latest_source = str(latest_event.get("source", "")).lower()
+            latest_ts = float(latest_event.get("ts", 0) or 0)
+
+            self._log_continuity(
+                "continuity_entries_extracted",
+                {
+                    "chat_entry_count": chat_entry_count,
+                    "latest_source": latest_source,
+                },
+            )
+
+            if self._last_chat_event_ts is not None and latest_ts <= self._last_chat_event_ts:
+                self._log_continuity(
+                    "timestamp_gap_detected",
+                    {
+                        "previous_ts": self._last_chat_event_ts,
+                        "latest_ts": latest_ts,
+                    },
+                )
+            self._last_chat_event_ts = latest_ts
+
+            if "copilot" in latest_source:
+                self._log_activity(
+                    "copilot_activity_detected",
+                    {"source": latest_source},
+                )
+            if "continue" in latest_source:
+                self._log_activity(
+                    "continue_activity_detected",
+                    {"source": latest_source},
+                )
+
+            if self.runtime_locality_payload:
+                focus = self._infer_active_focus_from_chat()
+                activation = self._infer_locality_activation(focus)
+                compact_bundle = self._build_compact_bundle(focus, activation)
+                active_context = self._build_active_context_payload(
+                    focus, compact_bundle, activation
+                )
+                self._write_json("compact_bundle.json", compact_bundle)
+                self._write_json("active_context.json", active_context)
+                self._log_continuity(
+                    "projection_refresh_started",
+                    {"trigger": "chat_history"},
+                )
+                self._log_continuity(
+                    "compact_bundle_refreshed",
+                    {"context_count": len(compact_bundle.get("bundle", []))},
+                )
+                self._log_continuity(
+                    "active_context_refreshed",
+                    {
+                        "activated_objects": len(
+                            active_context.get("activated_objects", [])
+                        ),
+                    },
+                )
+                self._log_continuity(
+                    "projection_refresh_completed",
+                    {"trigger": "chat_history"},
+                )
+            else:
+                self._log_continuity(
+                    "projection_skipped",
+                    {"reason": "runtime_locality_payload_missing"},
+                )
+
             self._refresh_locality_authority_state(chat_data)
+            self._run_continuity_refresh(
+                trigger="chat_history",
+                reason="AI chat history update",
+            )
+        else:
+            self._log_continuity(
+                "continuity_entries_skipped",
+                {"reason": "invalid_chat_history_format"},
+            )
 
     def _cycle_lock_path(self) -> Path:
         return self.artifact_dir / self.cycle_lock_name
@@ -1336,23 +1735,70 @@ class WorkspaceContinuityDaemon:
             data = dict(data)
             data["workspace_metadata"] = self._workspace_metadata()
 
-        try:
-            canonical_new = self._canonical_json(data)
-            if path.exists():
-                try:
-                    existing = json.loads(path.read_text(encoding="utf-8"))
-                    canonical_existing = self._canonical_json(existing)
-                    if canonical_existing == canonical_new:
-                        return
-                except Exception:
-                    # If existing content is invalid, rewrite once with canonical payload.
-                    pass
+        canonical_new = self._canonical_json(data)
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                canonical_existing = self._canonical_json(existing)
+                if canonical_existing == canonical_new:
+                    if path.name in {
+                        "compact_bundle.json",
+                        "active_context.json",
+                        "topology_compact.json",
+                        "locality_index.json",
+                    }:
+                        self._log_continuity(
+                            "projection_no_changes",
+                            {"path": str(path.relative_to(self.artifact_dir))},
+                        )
+                    return
+            except Exception:
+                # If existing content is invalid, rewrite once with canonical payload.
+                pass
 
-            path.write_text(
-                json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
-            )
-        except OSError as exc:
-            LOG.warning("Failed to write PECS artifact %s: %s", path, exc)
+        for attempt in range(1, 4):
+            try:
+                path.write_text(
+                    json.dumps(data, indent=2, sort_keys=True), encoding="utf-8"
+                )
+                return
+            except OSError as exc:
+                if attempt >= 3:
+                    self._log_error(
+                        "write_timeout",
+                        {
+                            "path": str(path.relative_to(self.artifact_dir)),
+                            "error": str(exc),
+                        },
+                    )
+                    LOG.warning("Failed to write PECS artifact %s: %s", path, exc)
+                    break
+                transient = exc.errno in {
+                    errno.EAGAIN,
+                    errno.EINTR,
+                    errno.EWOULDBLOCK,
+                    errno.ETIMEDOUT,
+                }
+                if transient:
+                    self._log_error(
+                        "write_retry",
+                        {
+                            "path": str(path.relative_to(self.artifact_dir)),
+                            "attempt": attempt,
+                            "error": str(exc),
+                        },
+                    )
+                    time.sleep(0.25 * attempt)
+                    continue
+                self._log_error(
+                    "projection_refresh_failed",
+                    {
+                        "path": str(path.relative_to(self.artifact_dir)),
+                        "error": str(exc),
+                    },
+                )
+                LOG.warning("Failed to write PECS artifact %s: %s", path, exc)
+                break
 
     def _write_pid_file(self) -> None:
         pid_path = self.artifact_dir / self.pid_file_name
@@ -1420,6 +1866,8 @@ class WorkspaceContinuityDaemon:
             "topology_ready": topology_ready,
             "continuity_ready": continuity_ready,
             "last_rebuild_timestamp": self._last_rebuild_timestamp,
+            "last_continuity_refresh_timestamp": self._last_continuity_refresh_timestamp,
+            "last_continuity_refresh_status": self._last_continuity_refresh_status,
             "health_issues": issues,
             "status": status,
             "core_artifacts": core_artifacts,

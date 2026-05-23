@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from execution_graph.indexes.execution_index import (
     ExecutionIndex,
@@ -11,6 +11,7 @@ from execution_graph.indexes.execution_index import (
 from execution_graph.indexes.ownership_index import (
     OwnershipIndex,
 )
+from runtime.runtime_telemetry import emit_runtime_event
 from ..indexing.locality_index import LocalityIndex
 from ..scoring.continuity_score_engine import (
     ContinuityScoreEngine,
@@ -103,11 +104,28 @@ class TopologyRetriever:
         ]
 
         position = 0
+        group_counts: Dict[str, int] = {}
+        runtime_group_presence: Dict[str, bool] = {}
+
+        for _, locality in all_sources:
+            for anchor in locality:
+                group = self._anchor_group_key(anchor)
+                group_counts[group] = group_counts.get(group, 0) + 1
+                if self._anchor_is_runtime_interaction(anchor):
+                    runtime_group_presence[group] = True
+
         for source_name, locality in all_sources:
             weight = source_weights.get(source_name, 0.0)
             for anchor in locality:
                 duplicate_counts[anchor] = duplicate_counts.get(anchor, 0) + 1
-                anchor_scores[anchor] = anchor_scores.get(anchor, 0.0) + weight
+                score = anchor_scores.get(anchor, 0.0) + weight
+                if self._anchor_is_runtime_interaction(anchor):
+                    score += 0.15
+                else:
+                    group = self._anchor_group_key(anchor)
+                    if runtime_group_presence.get(group, False) and group_counts.get(group, 0) > 1:
+                        score *= 0.92
+                anchor_scores[anchor] = score
                 if anchor not in first_seen:
                     first_seen[anchor] = position
                     position += 1
@@ -213,6 +231,144 @@ class TopologyRetriever:
             "duplicate_count": len(duplicate_lineages),
         }
 
+    def _anchor_group_key(self, anchor: str) -> str:
+        if self._anchor_is_runtime_interaction(anchor):
+            return anchor
+        if anchor.startswith("PECS_ID:") and "." in anchor:
+            parts = anchor.split(".")
+            if len(parts) > 2:
+                return ".".join(parts[:2])
+        return anchor
+
+    def _anchor_is_runtime_interaction(self, anchor: str) -> bool:
+        return any(
+            anchor.startswith(prefix)
+            for prefix in (
+                "PECS_ID:action.",
+                "PECS_ID:shortcut.",
+                "PECS_ID:callback.",
+                "PECS_ID:dialog.",
+                "PECS_ID:signal.",
+            )
+        )
+
+    def _prioritize_hydration_anchor_list(self, anchors: List[str]) -> List[str]:
+        ordered: List[str] = []
+        seen_groups: Set[str] = set()
+
+        for anchor in anchors:
+            if self._anchor_is_runtime_interaction(anchor):
+                group = self._anchor_group_key(anchor)
+                if group not in seen_groups:
+                    ordered.append(anchor)
+                    seen_groups.add(group)
+
+        for anchor in anchors:
+            group = self._anchor_group_key(anchor)
+            if group not in seen_groups:
+                ordered.append(anchor)
+                seen_groups.add(group)
+
+        return ordered
+
+    def _select_hydration_anchors(
+        self,
+        object_locality: List[str],
+        execution_locality: List[str],
+        ownership_locality: List[str],
+        continuity_signals: Optional[Dict[str, object]],
+        locality_limit: int = 12,
+    ) -> Dict[str, object]:
+        chosen: List[str] = []
+        seen: Set[str] = set()
+
+        def _add(anchor: str) -> None:
+            if anchor and anchor not in seen:
+                seen.add(anchor)
+                chosen.append(anchor)
+
+        runtime_confirmed = bool(
+            continuity_signals
+            and continuity_signals.get("runtime_confirmed_locality")
+        )
+        accepted_scores = (
+            continuity_signals.get("accepted_locality_scores", {})
+            if continuity_signals
+            else {}
+        ) or {}
+
+        object_locality = self._prioritize_hydration_anchor_list(object_locality)
+        execution_locality = self._prioritize_hydration_anchor_list(execution_locality)
+        ownership_locality = self._prioritize_hydration_anchor_list(ownership_locality)
+
+        # Phase 0: narrow runtime-confirmed locality first.
+        if execution_locality:
+            for anchor in execution_locality:
+                _add(anchor)
+            phase = "phase_0_runtime_confirmed"
+        elif runtime_confirmed and accepted_scores:
+            for anchor, score in sorted(
+                accepted_scores.items(),
+                key=lambda item: (-float(item[1] or 0.0), item[0]),
+            ):
+                _add(anchor)
+                if len(chosen) >= max(3, locality_limit // 2):
+                    break
+            phase = "phase_0_runtime_confirmed"
+        elif ownership_locality:
+            for anchor in ownership_locality:
+                _add(anchor)
+            phase = "phase_1_callback_ownership"
+        elif object_locality:
+            for anchor in object_locality:
+                _add(anchor)
+            phase = "phase_2_object_locality"
+        else:
+            phase = "phase_5_archaeology_fallback"
+
+        # Phase 2: hydrate with continuity-supported anchors when needed.
+        if len(chosen) < max(3, locality_limit // 2) and accepted_scores:
+            for anchor, score in sorted(
+                accepted_scores.items(),
+                key=lambda item: (-float(item[1] or 0.0), item[0]),
+            ):
+                _add(anchor)
+                if len(chosen) >= locality_limit:
+                    break
+            if phase == "phase_5_archaeology_fallback":
+                phase = "phase_3_continuity_hydration"
+
+        # Phase 3: expand to ownership and object locality only if still under threshold.
+        if len(chosen) < locality_limit:
+            for anchor in object_locality + ownership_locality + execution_locality:
+                _add(anchor)
+                if len(chosen) >= locality_limit:
+                    break
+            if phase.startswith("phase_0") or phase.startswith("phase_1"):
+                phase = phase
+            elif phase == "phase_2_object_locality" and len(chosen) > len(object_locality):
+                phase = "phase_4_bounded_topology_expansion"
+            elif phase == "phase_5_archaeology_fallback":
+                phase = "phase_4_bounded_topology_expansion"
+
+        # Phase 4: if still insufficient, include all available anchors up to limit.
+        if len(chosen) < locality_limit:
+            for anchor in sorted(
+                set(object_locality + execution_locality + ownership_locality)
+                - seen,
+            ):
+                _add(anchor)
+                if len(chosen) >= locality_limit:
+                    break
+            if not phase.startswith("phase_"):
+                phase = "phase_5_archaeology_fallback"
+
+        return {
+            "anchors": chosen,
+            "hydration_phase": phase,
+            "selected_count": len(chosen),
+        }
+
     def retrieve_continuity_context(
         self,
         object_id: str,
@@ -250,8 +406,16 @@ class TopologyRetriever:
             continuity_signals=continuity_signals,
         )
 
+        hydration = self._select_hydration_anchors(
+            object_locality=object_locality,
+            execution_locality=execution_locality,
+            ownership_locality=ownership_locality,
+            continuity_signals=continuity_signals,
+            locality_limit=locality_limit,
+        )
+
         locality_score = self.scoring_engine.score_locality(
-            anchors_info["anchors"]
+            hydration["anchors"]
         )
         runtime_score = self.scoring_engine.score_runtime_authority(
             len(execution_locality)
@@ -260,7 +424,7 @@ class TopologyRetriever:
             len(ownership_locality)
         )
         propagation_score = self.scoring_engine.score_propagation(
-            len(anchors_info["anchors"])
+            len(hydration["anchors"])
         )
 
         confidence = round(
@@ -330,7 +494,8 @@ class TopologyRetriever:
             "object_locality": object_locality,
             "execution_locality": execution_locality,
             "ownership_locality": ownership_locality,
-            "anchors": anchors_info["anchors"],
+            "anchors": hydration["anchors"],
+            "selected_hydration_phase": hydration["hydration_phase"],
             "anchor_scores": anchors_info["anchor_scores"],
             "duplicate_lineages": anchors_info["duplicate_lineages"],
             "stale_lineages": [],
@@ -339,6 +504,7 @@ class TopologyRetriever:
                 "execution_locality": len(execution_locality),
                 "ownership_locality": len(ownership_locality),
                 "total_unique": len(anchors_info["anchors"]),
+                "selected_unique": len(hydration["anchors"]),
             },
             "scores": {
                 "locality_score": locality_score,
@@ -347,7 +513,7 @@ class TopologyRetriever:
                 "propagation_score": propagation_score,
                 "confidence": confidence,
             },
-            "token_estimate": max(1, len(anchors_info["anchors"])),
+            "token_estimate": max(1, len(hydration["anchors"])),
             "retrieval_latency_ms": round((perf_counter() - start) * 1000, 2),
             "retrieval_source_count": anchors_info["retrieval_source_count"],
             "fallback_allowed": fallback_allowed,
@@ -407,6 +573,20 @@ class TopologyRetriever:
             result["retrieval_status"] = "ok"
 
         self.retrieval_metadata[object_id] = result
+        emit_runtime_event(
+            subsystem="RETRIEVAL",
+            event="continuity_context_retrieved",
+            payload={
+                "object_id": object_id,
+                "path_id": path_id,
+                "owner_id": lookup_owner,
+                "anchors": result.get("anchors", []),
+                "confidence": result.get("scores", {}).get("confidence"),
+                "retrieval_status": result.get("retrieval_status"),
+                "retrieval_mode": result.get("retrieval_mode"),
+                "fallback_allowed": result.get("fallback_allowed"),
+            },
+        )
 
         if manual_override:
             LOG.warning(

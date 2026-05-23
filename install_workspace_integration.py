@@ -571,242 +571,148 @@ def _merge_json_dict(path: Path, updates: Dict[str, Any]) -> None:
     path.write_text(json.dumps(current, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
+MANAGED_CONFIG_START = "# PECS MANAGED CONFIG START"
+MANAGED_CONFIG_END = "# PECS MANAGED CONFIG END"
+
+
+def _backup_target_file(workspace_root: Path, target: Path, suffix: str = "pecs-backup") -> Path:
+    backup_dir = workspace_root / ".pecs" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_name = f"{target.name}.{suffix}.{timestamp}"
+    backup_path = backup_dir / backup_name
+    shutil.copy2(target, backup_path)
+    return backup_path
+
+
+def _copy_canonical_asset(source: Path, target: Path, workspace_root: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        shutil.copy2(source, target)
+        return
+
+    source_text = source.read_text(encoding="utf-8")
+    target_text = target.read_text(encoding="utf-8")
+    if source_text != target_text:
+        _backup_target_file(workspace_root, target, suffix="pecs-asset-backup")
+        shutil.copy2(source, target)
+
+
+def _replace_managed_block(existing: str, canonical: str) -> str:
+    if MANAGED_CONFIG_START in existing and MANAGED_CONFIG_END in existing:
+        prefix, remainder = existing.split(MANAGED_CONFIG_START, 1)
+        _, suffix = remainder.split(MANAGED_CONFIG_END, 1)
+        return prefix + canonical + suffix
+    return canonical
+
+
+def _write_continue_config(workspace_root: Path, repo_root: Path) -> None:
+    config_source = repo_root / "workspace_assets" / ".continue" / "config.yaml"
+    config_target = workspace_root / ".continue" / "config.yaml"
+    config_target.parent.mkdir(parents=True, exist_ok=True)
+
+    if not config_source.exists():
+        return
+
+    canonical_config = config_source.read_text(encoding="utf-8")
+    if not config_target.exists():
+        config_target.write_text(canonical_config, encoding="utf-8")
+        return
+
+    existing_config = config_target.read_text(encoding="utf-8")
+    if existing_config == canonical_config:
+        return
+
+    if MANAGED_CONFIG_START in existing_config and MANAGED_CONFIG_END in existing_config:
+        merged = _replace_managed_block(existing_config, canonical_config)
+        if merged != existing_config:
+            _backup_target_file(workspace_root, config_target, suffix="pecs-config-backup")
+            config_target.write_text(merged, encoding="utf-8")
+        return
+
+    _backup_target_file(workspace_root, config_target, suffix="pecs-config-backup")
+    config_target.write_text(canonical_config, encoding="utf-8")
+
+
+def _write_continue_rule_inventory(workspace_root: Path, rules_dir: Path, canonical_names: set[str]) -> None:
+    existing_files = sorted(
+        [path.name for path in rules_dir.iterdir() if path.is_file() and path.name != "PECS_RULES_INVENTORY.md"]
+    )
+    extra_files = [name for name in existing_files if name not in canonical_names]
+
+    inventory_lines = [
+        "# PECS Continue Rules Inventory",
+        "",
+        "This file documents canonical PECS Continue rule assets installed into this workspace.",
+        "Do not edit canonical PECS rule files unless you are explicitly customizing your workspace integration.",
+        "",
+        "## Canonical Rule Assets",
+    ]
+    inventory_lines.extend([f"- {name}" for name in sorted(canonical_names)])
+
+    if extra_files:
+        inventory_lines.extend([
+            "",
+            "## Extra files detected in .continue/rules",
+            "These files are not part of the canonical PECS rule set and may be stale or user-defined.",
+        ])
+        inventory_lines.extend([f"- {name}" for name in extra_files])
+        inventory_lines.append("")
+        inventory_lines.append(
+            "If these files are stale, remove them or move them to a local customization directory."
+        )
+
+    inventory_path = rules_dir / "PECS_RULES_INVENTORY.md"
+    inventory_path.write_text("\n".join(inventory_lines), encoding="utf-8")
+
+
 def _write_continue_rules(workspace_root: Path) -> None:
     rules_dir = workspace_root / ".continue" / "rules"
     rules_dir.mkdir(parents=True, exist_ok=True)
 
-    pecs_context_rule = """# PECS-PRO Authority & PECS-LITE Projection Rule
+    repo_root = Path(__file__).resolve().parent
+    workspace_assets_rules = repo_root / "workspace_assets" / ".continue" / "rules"
+    if not workspace_assets_rules.exists():
+        return
 
-PECS artifacts are generated continuity infrastructure only.
-They do NOT contain editable sourcecode.
+    canonical_rule_names = set()
+    for source_file in sorted(workspace_assets_rules.iterdir()):
+        if source_file.is_file():
+            canonical_rule_names.add(source_file.name)
+            target_file = rules_dir / source_file.name
+            _copy_canonical_asset(source_file, target_file, workspace_root)
 
-## Authority Model
-
-PECS-PRO owns:
-- runtime topology
-- execution continuity
-- workspace state truth
-
-PECS-LITE projects:
-- compact runtime locality
-- execution neighborhood
-- model-adapted guidance
-
-## Before Proposing Edits
-
-Read and respect:
-- .pecs/active_context.json (PECS-PRO runtime context)
-- .pecs/locality_index.json (PECS-PRO locality weighting)
-- .pecs/active_topology.json (PECS-PRO topology authority)
-
-Priority order:
-1. Live workspace runtime modules (always authoritative)
-2. PECS-PRO continuity artifacts (.pecs/ infrastructure)
-3. PECS-LITE projections (ephemeral locality guidance)
-4. Structured accepted engineering continuity chains
-
-## Rules
-
-- Never edit or patch .pecs/ files
-- Use PECS for locality retrieval only
-- Target runtime workspace modules for edits
-- Respect execution neighborhood hints from PECS-LITE
-- Query PECS-LITE for runtime target projection, not PECS-PRO directly
-- Treat continuity guidance as probabilistic (confidence-aware), not deterministic
-- Do not use raw chat narrative as engineering locality authority
-
-## Environment
-
-Always run workspace commands with environment activation:
-```
-cd \"${workspaceFolder}\"
-if [[ -f .venv/bin/activate ]]; then source .venv/bin/activate; fi
-```
-
-## PECS-LITE Projection Profiles
-
-PECS-LITE adapts its locality guidance based on model constraints.
-Profile selection is MIDDLEWARE responsibility, not PECS inference.
-
-### Profile Selection Guidance
-
-**Small Models (Qwen/DeepSeek 16k-32k):**
-- Use `projection_profile: small` (default for Continue)
-- Receives: 1-3 primary targets, 1-2 secondary candidates
-- Focus: aggressive execution-locality narrowing
-- Token efficiency: ~850-1500 tokens
-
-**Medium Models (32k-100k context):**
-- Use `projection_profile: medium` if default insufficient
-- Receives: 3-6 primary targets, nearby execution adjacency
-- Focus: balanced locality + execution relationships
-- Token efficiency: ~2000-3000 tokens
-
-**Large Models (100k+, GPT-5/Claude-class):**
-- Use `projection_profile: large` if high context available
-- Receives: broader targets + structured continuity enrichment
-- Focus: execution-locality relationships + bounded richness
-- Token efficiency: ~4000-8000 tokens
-
-### Important
-
-- CONTINUE DOES NOT INFER MODEL CAPABILITY
-- Profile selection is your responsibility based on actual model
-- If unsure, use `projection_profile: small` (safest default)
-
-## Engineering Continuity Principle
-
-PECS preserves accepted engineering continuity, not raw conversational history.
-
-Use structured continuity chains:
-- issue -> accepted_locality -> outcome
-- rejected_locality for downranking failed chains
-- continuity_confidence for probabilistic locality guidance
-
-Do NOT treat raw chat transcripts as continuity authority.
-Accepted engineering locality is higher signal than conversational narrative.
-"""
-
-    pecs_append_rule = """# PECS Chat History Append Rule
-
-For each significant Continue conversation turn, append an event to:
-.pecs/ai_chat_history.json
-
-This helps PECS-PRO track execution context over time.
-
-Preferred command:
-```
-python3 .pecs/tools/append_ai_chat_history.py \"${workspaceFolder}\" \\
-  --source continue --message \"<summary>\"
-```
-
-If Continue automation can emit structured JSON:
-```
-python3 .pecs/tools/append_ai_chat_history.py \"${workspaceFolder}\" \\
-  --payload-json '<json-object>'
-```
-"""
-
-    (rules_dir / "PECS_CONTEXT_RULE.md").write_text(pecs_context_rule, encoding="utf-8")
-    (rules_dir / "PECS_APPEND_RULE.md").write_text(pecs_append_rule, encoding="utf-8")
+    _write_continue_rule_inventory(workspace_root, rules_dir, canonical_rule_names)
 
 
-def _write_copilot_instructions(workspace_root: Path) -> None:
+def _write_copilot_instructions(workspace_root: Path, repo_root: Path) -> None:
     github_dir = workspace_root / ".github"
     github_dir.mkdir(parents=True, exist_ok=True)
 
-    content = """# Copilot Workspace Instructions — PECS v2 Architecture
+    source = repo_root / "workspace_assets" / ".github" / "copilot-instructions.md"
+    target = github_dir / "copilot-instructions.md"
+    if not source.exists():
+        return
 
-PECS artifacts are generated continuity infrastructure only.
-They do NOT contain editable engineering sourcecode.
+    source_text = source.read_text(encoding="utf-8")
+    if not target.exists():
+        target.write_text(source_text, encoding="utf-8")
+        return
 
-## Authority Model
+    existing_text = target.read_text(encoding="utf-8")
+    if source_text.strip() in existing_text:
+        return
 
-PECS-PRO owns and maintains:
-- runtime topology reconstruction
-- execution graph continuity
-- workspace state truth
-- continuity persistence
+    _backup_target_file(workspace_root, target, suffix="pecs-copilot-backup")
+    append_path = github_dir / "PECS_COPILOT_APPEND.md"
+    append_path.write_text(
+        "# PECS Copilot Instructions Append\n\n"
+        "The existing `.github/copilot-instructions.md` file was preserved. "
+        "Use this file to review PECS-specific workspace guidance and merge it manually if needed.\n\n"
+        + source_text,
+        encoding="utf-8",
+    )
 
-PECS-LITE is a stateless projection layer:
-- queries PECS-PRO
-- returns compact locality guidance
-- never owns topology or state
-- never runs as independent daemon
-
-## Before Suggesting Edits
-
-Inspect these authoritative files when present:
-- .pecs/active_context.json (PECS-PRO context)
-- .pecs/locality_index.json (PECS-PRO locality)
-- .pecs/active_topology.json (PECS-PRO topology)
-- .continue/rules/CONTINUITY_MAP.md (if present)
-
-Copilot guidance:
-1. Live workspace runtime modules are authoritative and editable
-2. Use .pecs artifacts ONLY to narrow locality and identify runtime targets
-3. Never edit .pecs files or treat them as sourcecode
-4. Query PECS-LITE for runtime target projection
-5. Respect execution neighborhood and continuity hints
-6. Trust PECS-PRO topology over ad-hoc repository search
-
-## Editing Rules
-
-- Target only live workspace runtime modules for changes
-- Use PECS-LITE locality guidance to narrow search scope
-- Do NOT edit .pecs infrastructure files
-- Do NOT treat PECS artifacts as authoritative sourcecode
-- When in doubt, rely on PECS-PRO continuity authority
-- Use accepted engineering continuity chains to continue prior accepted locality
-- Downrank repeatedly rejected locality before proposing edits
-
-## Environment
-
-When running workspace commands, prefer:
-```
-cd \"${workspaceFolder}\"
-if [[ -f .venv/bin/activate ]]; then source .venv/bin/activate; fi
-```
-
-For chat continuity tracking:
-```
-python3 .pecs/tools/append_ai_chat_history.py \"${workspaceFolder}\" \\
-  --source copilot --message \"<summary>\"
-```
-
-## PECS-LITE Adaptive Projection Profiles
-
-PECS-LITE adapts locality projection richness based on model constraints.
-Projection profile selection belongs to middleware/client integrations, NOT PECS.
-
-### Profile Selection for Copilot
-
-**Default Profile: MEDIUM**
-- Suitable for Claude/GPT-4 class reasoning models
-- Default: `projection_profile: medium` unless overridden
-- Receives: 3-6 primary targets, execution adjacency hints
-- Token efficiency: ~2000-3000 tokens
-
-**For Small Models (if using local/constrained models):**
-- Override: `projection_profile: small`
-- Receives: 1-3 primary targets, 1-2 secondary candidates
-- Focus: extreme execution-locality precision
-- Token efficiency: ~850-1500 tokens
-
-**For Very Large Models:**
-- Override: `projection_profile: large`
-- Receives: fuller execution-locality relationships + bounded richness
-- Focus: structured continuity exploration
-- Token efficiency: ~4000-8000 tokens
-
-### Important
-
-- COPILOT DOES NOT INFER MODEL CAPABILITY
-- Profile selection is YOUR responsibility
-- Default (medium) is conservative and well-tested
-- Always verify projected targets make sense for your edit scope
-- When uncertain, use profile: medium
-
-## Engineering Continuity Principle
-
-PECS preserves structured accepted engineering continuity only:
-- accepted locality
-- rejected locality chains
-- continuity confidence
-- unresolved engineering locality tensions
-
-PECS does NOT preserve raw conversational transcripts as projection context.
-Use confidence-aware continuity signals as probabilistic guidance.
-
-## Important
-
-- This file is guidance for PECS integration, not authoritative sourcecode
-- PECS improves locality certainty but does not replace reasoning
-- Always verify changes against actual runtime behavior
-- Test before committing
-"""
-
-    (github_dir / "copilot-instructions.md").write_text(content, encoding="utf-8")
 
 
 def _install_chat_tools(workspace_root: Path, repo_root: Path) -> None:
@@ -1504,8 +1410,14 @@ Runtime workspace modules are the authoritative implementation.
 Installed items:
 - .vscode/tasks.json (PECS tasks, including folder-open auto-start)
 - .vscode/settings.json with pecs.contextPath
+- .continue/config.yaml
+- .continue/rules/pecs-first-routing.yaml
 - .continue/rules/PECS_CONTEXT_RULE.md
 - .continue/rules/PECS_APPEND_RULE.md
+- .continue/rules/CONTINUITY_MAP.md
+- .continue/rules/PECS_CODING_PROTOCOL.md
+- .continue/rules/PECS_PROMPT.md
+- .continue/rules/live-context.md
 - .github/copilot-instructions.md
 - .pecs/tools/append_ai_chat_history.py
 - .pecs/ai_chat_history.json
@@ -1573,8 +1485,9 @@ def install_workspace(workspace_root: Path, repo_root: Path) -> None:
             "pecs.contextPath": ".pecs/active_context.json",
         },
     )
+    _write_continue_config(workspace_root, repo_root)
     _write_continue_rules(workspace_root)
-    _write_copilot_instructions(workspace_root)
+    _write_copilot_instructions(workspace_root, repo_root)
     _copy_manual_setup_guide(workspace_root, repo_root)
     _write_readme(workspace_root)
     _write_workspace_install_root(workspace_root, repo_root)

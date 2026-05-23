@@ -6,6 +6,7 @@ from typing import Dict, List
 from ..topology.retrieval.topology_retriever import (
     TopologyRetriever,
 )
+from runtime.runtime_telemetry import emit_runtime_event
 
 
 @dataclass
@@ -29,9 +30,23 @@ class CopilotAdapter:
         self,
         object_id: str,
     ) -> Dict[str, object]:
+        emit_runtime_event(
+            subsystem="DOWNSTREAM",
+            event="copilot_request_intercepted",
+            payload={"object_id": object_id},
+        )
         continuity_context = (
             self.topology_retriever
             .build_minimal_context(object_id)
+        )
+        emit_runtime_event(
+            subsystem="DOWNSTREAM",
+            event="copilot_context_built",
+            payload={
+                "object_id": object_id,
+                "anchors": continuity_context.get("anchors", []),
+                "confidence": continuity_context.get("confidence"),
+            },
         )
 
         return {

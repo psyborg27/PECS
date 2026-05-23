@@ -5,8 +5,9 @@ import re
 import ast
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import time
+from runtime.runtime_telemetry import emit_runtime_event
 
 
 class PECSProQueryAdapter:
@@ -54,6 +55,26 @@ class PECSProQueryAdapter:
                 "active_engineering_chains": [],
                 "updated_at": "",
             },
+        )
+        emit_runtime_event(
+            subsystem="ARTIFACT_LOADING",
+            event="continuity_artifacts_loaded",
+            payload={
+                "workspace_root": str(self.workspace_root),
+                "artifact_count": len(
+                    [
+                        self.active_context,
+                        self.compact_bundle,
+                        self.locality_index,
+                        self.topology_compact,
+                        self.locality_state,
+                        self.active_topology,
+                        self.engineering_continuity,
+                    ]
+                ),
+                "retrieval_ready": self._runtime_observability_available(),
+            },
+            workspace_root=self.workspace_root,
         )
 
     def _runtime_observability_available(self) -> bool:
@@ -270,6 +291,93 @@ class PECSProQueryAdapter:
 
         return [file_path] if file_path else []
 
+    def _runtime_interaction_adjacency(self) -> Dict[str, List[str]]:
+        file_map = self._build_file_map()
+        adjacency: Dict[str, List[str]] = {}
+        runtime_edge_types = {
+            "signal_slot",
+            "shortcut_register",
+            "shortcut_ownership",
+            "qaction_register",
+            "qaction_factory_register",
+            "qaction_ownership",
+            "dialog_launch",
+        }
+
+        for edge in self.topology_compact.get("edges", []) if isinstance(self.topology_compact, dict) else []:
+            if not isinstance(edge, dict):
+                continue
+            edge_type = str(edge.get("type", ""))
+            if edge_type not in runtime_edge_types:
+                continue
+
+            src = str(edge.get("from", "") or "")
+            dst = str(edge.get("to", "") or "")
+            src_file = file_map.get(src, "")
+            dst_file = file_map.get(dst, "")
+            if not src_file or not dst_file:
+                continue
+            if src_file.startswith(".pecs") or dst_file.startswith(".pecs"):
+                continue
+
+            adjacency.setdefault(src_file, []).append(dst_file)
+            adjacency.setdefault(dst_file, []).append(src_file)
+
+        # Normalize adjacency deterministically
+        for path, neighbors in adjacency.items():
+            adjacency[path] = sorted(set(neighbors))
+
+        return adjacency
+
+    def runtime_interaction_neighborhood_lookup(
+        self,
+        max_neighbors: int = 12,
+    ) -> List[str]:
+        seeds: List[str] = []
+        for obj in (
+            self.active_context.get("activated_objects", [])
+            if isinstance(self.active_context, dict)
+            else []
+        ):
+            file_path = self._build_file_map().get(str(obj))
+            if file_path and file_path not in seeds:
+                seeds.append(file_path)
+
+        for touched in (
+            self.locality_state.get("active_runtime_touched_files", [])
+            if isinstance(self.locality_state, dict)
+            else []
+        ):
+            file_path = self._normalize_path(str(touched.get("file", "") or ""))
+            if file_path and file_path not in seeds:
+                seeds.append(file_path)
+
+        adjacency = self._runtime_interaction_adjacency()
+        neighborhood: List[str] = []
+        visited: Set[str] = set()
+        queue: List[str] = []
+
+        for seed in seeds:
+            if seed and seed not in visited:
+                queue.append(seed)
+                visited.add(seed)
+                neighborhood.append(seed)
+                if len(neighborhood) >= max_neighbors:
+                    return neighborhood[:max_neighbors]
+
+        while queue and len(neighborhood) < max_neighbors:
+            current = queue.pop(0)
+            for neighbor in adjacency.get(current, []):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                neighborhood.append(neighbor)
+                queue.append(neighbor)
+                if len(neighborhood) >= max_neighbors:
+                    break
+
+        return neighborhood[:max_neighbors]
+
     def detect_behavioral_failures(
         self,
         issue_query: str,
@@ -410,13 +518,42 @@ class PECSProQueryAdapter:
 
         This method is query-only and reads PECS-PRO artifacts. It never scans the workspace.
         """
+        interaction_files = self.runtime_interaction_neighborhood_lookup(
+            max_neighbors=max_targets
+        )
+
+        candidates: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for file_path in interaction_files:
+            if not file_path or file_path.startswith(".pecs/"):
+                continue
+            seen.add(file_path)
+            candidates.append(
+                {
+                    "file": file_path,
+                    "evidence": "runtime_interaction",
+                    "base_confidence": 0.88,
+                    "is_active": True,
+                    "tier_scores": {
+                        "tier_1_runtime": 1.0,
+                    },
+                    "evidence_sources": {
+                        "tier_1_runtime": ["runtime_interaction_graph"],
+                    },
+                    "provenance": ["runtime_interaction_graph"],
+                }
+            )
+            if len(candidates) >= max_targets:
+                return candidates
+
         fusion = self.evidence_fusion_lookup(max_files=max_targets * 2)
         ranked_files = fusion.get("ranked_files", [])
 
-        candidates: List[Dict[str, Any]] = []
-        for item in ranked_files[:max_targets]:
+        for item in ranked_files:
             file_path = str(item.get("file", "") or "")
             if not file_path or file_path.startswith(".pecs/"):
+                continue
+            if file_path in seen:
                 continue
             tier_scores = item.get("tier_scores", {})
             candidates.append(
@@ -430,6 +567,8 @@ class PECSProQueryAdapter:
                     "provenance": item.get("provenance", []),
                 }
             )
+            if len(candidates) >= max_targets:
+                break
 
         return candidates
 

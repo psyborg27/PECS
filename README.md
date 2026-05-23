@@ -63,174 +63,23 @@ PECS artifacts are queryable continuity infrastructure only.
 PECS is NOT editable engineering sourcecode.
 Use `.pecs` for locality retrieval, then edit runtime workspace modules.
 
-## PECS Installation Quickstart
+## Installation Entry Point
 
-This section describes the full install and bootstrap flow for a new user.
+Use the canonical install path in **Installation and Runtime Workflow (Current)**.
+That section is the single source for clone/setup/bootstrap/daemon/refresh workflow.
 
-### Supported platforms
+Supported platforms:
 
 - macOS
 - Linux
 - Windows 10 / 11
 
-### Prerequisites
+Prerequisites:
 
 - Git
 - Python 3.9 or newer
 - VS Code (recommended for task integration)
 - PowerShell or CMD on Windows
-
-### What PECS does
-
-PECS installs developer continuity infrastructure for a workspace.
-It creates a workspace-local `.pecs` folder with integration assets, daemon launchers, AI history support, and continuity refresh tools.
-
-The PECS daemon monitors workspace continuity, generates `.pecs` artifacts, and enables runtime-targeted editing support.
-
-### What `.pecs` folder creation means
-
-When `.pecs` appears in your workspace, PECS has installed integration assets. The folder contains infrastructure files only. Do not edit its contents directly.
-
-### Expected first-run behavior
-
-- The installer prompts for a workspace path if one is not provided.
-- It validates the path exists and is writable.
-- It creates `.pecs` in the target workspace.
-- It installs workspace assets, starts the daemon, runs AI history generation, and refreshes continuity.
-- Initial setup may take 30 seconds to several minutes depending on workspace size and dependency installation.
-- Errors are reported in the terminal output and by the installer.
-
-### Installation steps
-
-#### 1. Clone the repository and select the stable branch
-
-```bash
-git clone <your-repo-url> ~/Developer/PECS
-cd ~/Developer/PECS
-git checkout main
-git pull origin main
-```
-
-#### 2. Install the PECS repository dependencies
-
-macOS / Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
-python -m pip install -e .
-```
-
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
-python -m pip install -e .
-```
-
-Windows CMD:
-
-```bat
-python -m venv .venv
-.venv\Scripts\activate.bat
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
-python -m pip install -e .
-```
-
-#### 3. Run the interactive workspace bootstrap
-
-macOS / Linux:
-
-```bash
-./install_pecs_workspace.sh
-```
-
-Windows PowerShell:
-
-```powershell
-.\install_pecs_workspace.ps1
-```
-
-If you already know the workspace path, pass it directly:
-
-```bash
-./install_pecs_workspace.sh "/path/to/workspace"
-```
-
-```powershell
-.\install_pecs_workspace.ps1 "C:\path\to\workspace"
-```
-
-#### 4. Alternative guided flow
-
-If you prefer a built-in guided command, use:
-
-```bash
-python -m workspace_bridge_cli interactive-setup
-```
-
-This prompts for the workspace path and performs the same full bootstrap flow.
-
-### Daemon startup behavior
-
-The installer uses `pecs bootstrap-workspace` under the hood.
-That command installs workspace integration, starts the PECS daemon, runs continuity refresh, and validates the workspace.
-
-A successful daemon startup writes a PID file to:
-
-```bash
-<workspace>/.pecs/daemon.pid
-```
-
-### AI history generation behavior
-
-The bootstrap process generates and validates `.pecs/ai_chat_history.json` and the active continuity artifacts.
-If history generation fails, the installer prints the full error and stops.
-
-### Refresh behavior
-
-The installer runs a workspace refresh as part of bootstrap.
-Use this command manually later to rebuild continuity after changes:
-
-```bash
-pecs refresh "<workspace>"
-```
-
-### Verification steps
-
-After installation, verify with:
-
-```bash
-pecs verify-workspace "<workspace>"
-pecs status "<workspace>"
-pecs refresh "<workspace>"
-pecs validate "<workspace>"
-```
-
-If you installed via the repo bootstrap helper, you can also run:
-
-```bash
-python3 scripts/pecs_health_check.py
-```
-
-### Troubleshooting
-
-- Daemon failed: inspect terminal output and confirm `.pecs/daemon.pid` exists.
-- AI history generation failed: copy the full error, check Python runtime, and rerun `pecs refresh`.
-- Refresh failed: inspect the error output and ensure workspace assets exist in `.pecs`.
-- Missing `.pecs` folder: rerun the installer and confirm the workspace path.
-- Incorrect workspace path: verify the path points to the intended workspace directory.
-- Permission issues: run with sufficient permissions or choose a writable workspace location.
-- Windows execution policy issues: use `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` if PowerShell blocks scripts.
-- venv activation issues: confirm the correct Python interpreter is available as `python3` or `python` and that `.venv\Scripts\Activate.ps1` exists.
-
-If installation fails, please copy the full error output, include your OS/version, branch name, and open an issue on GitHub.
 
 ## Installation Location Guidance
 
@@ -272,71 +121,6 @@ python3 install_workspace_integration.py <workspace-root> --validate-deps
 
 The installer and health check will warn if PECS is installed into an unstable location or if required dependencies are missing.
 
-- Python 3.9 or newer
-- Create a clean venv with `python3 -m venv .venv`
-- Upgrade packaging tools with `python -m pip install --upgrade pip setuptools wheel`
-- Install runtime dependencies with `python -m pip install -r requirements.txt`
-- Install PECS in editable mode with `python -m pip install -e .`
-- `watchdog` is declared as a runtime dependency and installed automatically
-
-## Continuity Bootstrap
-
-`pecs refresh <workspace>` is the formal continuity bootstrap phase.
-It is not incidental or optional once the workspace daemon is installed.
-
-Use it to reconstruct and initialize the workspace continuity model:
-
-- topology refresh
-- locality reconstruction
-- active continuity generation
-- active engineering context initialization
-
-Example:
-
-```bash
-pecs refresh "/Users/raj/Downloads/auto OCR app"
-```
-
-When a workspace is first onboarded or when the daemon cold-starts, `pecs refresh` ensures the workspace continuity artifacts are rebuilt in a reproducible way.
-
-## Operational Validation Commands
-
-Use these commands after onboarding, after rebinding, and after daemon recovery:
-
-```bash
-pecs verify-workspace "/path/to/workspace"
-pecs status "/path/to/workspace"
-pecs refresh "/path/to/workspace"
-pecs validate "/path/to/workspace"
-pecs doctor "/path/to/workspace"
-cat "/path/to/workspace/.pecs/daemon.pid"
-```
-
-These validate:
-
-- workspace asset installation
-- daemon state
-- continuity bootstrap and reconstruction
-- continuity schema health
-- install-root binding
-- entrypoint resolution
-
-## Optional Interactive Installer
-
-If you want a guided but still scriptable onboarding flow, use:
-
-```bash
-pecs interactive-setup
-```
-
-Or provide the workspace directly:
-
-```bash
-pecs interactive-setup "/path/to/workspace" --upgrade
-```
-
-This runs the same deterministic bootstrap lifecycle as `pecs bootstrap-workspace`, but prompts for the workspace path when needed.
-
 ## Relocation Recovery
 
 If the PECS install root changes, recover the workspace integration with:
@@ -353,34 +137,6 @@ pecs rebind-workspace "/path/to/your/workspace" --upgrade
 ```
 
 This rewrites workspace VS Code tasks, daemon launch bindings, and bridge paths to the current PECS install root.
-
-## Multi-Workspace Guidance
-
-PECS supports multiple simultaneous workspaces from a single centralized install root.
-Each workspace keeps its own `.pecs` integration and daemon, while the runtime itself remains centralized in one stable install location.
-
-- Centralized runtime ownership in a stable install root
-- Workspace-local integration and launcher bridges
-- Daemon-per-workspace continuity monitoring
-- Install-root binding via `.pecs/config/install_root.json`
-- Workspace-local launchers in `.pecs/run_pecs.*` and `.pecs/run_pecs_daemon.*`
-
-## Self-Hosting Guidance
-
-PECS may monitor its own repository workspace as a valid self-hosting scenario.
-In this case, the PECS repo workspace is both runtime and install root:
-
-```bash
-cd ~/Developer/PECS
-source .venv/bin/activate
-pecs bootstrap-workspace .
-pecs verify-workspace .
-pecs status .
-pecs refresh .
-pecs doctor .
-```
-
-Note: `.pecs` artifacts remain infrastructure only. Workspace runtime modules are authoritative, even for the PECS repo itself.
 
 ## Persistent Infrastructure Notice
 
@@ -590,19 +346,25 @@ PECS reduces execution-locality uncertainty by orders of magnitude, but does not
 
 PECS is **locality stabilization infrastructure only.**
 
-## Installation
+## Installation and Runtime Workflow (Current)
 
-### One-Command Setup (Recommended)
+This is the current supported setup path for this repository.
+Use this flow for new installs and workspace onboarding.
 
-PECS-PRO is designed to be installed in a reproducible editable environment.
-
-#### Step 1: Install PECS-PRO CLI (One Time)
-
-Clone or download PECS-PRO, then install it in editable mode:
+### 1. Clone and choose branch
 
 ```bash
-# From the PECS repository root
-cd /path/to/PECS
+git clone <your-repo-url> ~/Developer/PECS
+cd ~/Developer/PECS
+git checkout main
+git pull origin main
+```
+
+### 2. Create venv and install dependencies
+
+macOS / Linux:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
@@ -610,150 +372,47 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-If you need a shell alias for convenience, create one after installation:
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m pip install -e .
+```
+
+### 3. Bootstrap workspace integration (installer path)
+
+Use the repository installer script (interactive or path argument):
+
+macOS / Linux:
 
 ```bash
-alias pecs="$(pwd)/.venv/bin/pecs"
+./install_pecs_workspace.sh "/path/to/workspace"
 ```
 
-#### Step 2: Deploy PECS to Your Workspace (One Command)
+Windows PowerShell:
 
-Run this single command to set up any workspace:
+```powershell
+.\install_pecs_workspace.ps1 "C:\path\to\workspace"
+```
+
+The installer runs `workspace_bridge_cli bootstrap-workspace` under the hood.
+Bootstrap installs assets, writes install-root bindings, starts the daemon, triggers refresh, and verifies workspace integration.
+
+### 4. Verify runtime state
 
 ```bash
-pecs install-workspace-assets "/path/to/your/workspace"
+pecs verify-workspace "/path/to/workspace"
+pecs status "/path/to/workspace"
+pecs refresh "/path/to/workspace"
+pecs validate "/path/to/workspace"
 ```
 
-That's it! This installs:
+### 5. VS Code task workflow
 
-- **Copilot Configuration** (`.github/copilot-instructions.md`)
-  - Enforces PECS-first routing for context retrieval
-  - Directs Copilot to check `.pecs/` artifacts before repository search
-
-- **Continue Configuration** (`.continue/config.yaml` and `.continue/rules/pecs-first-routing.yaml`)
-  - Registers PECS-first routing rule
-  - Narrows search scope to locality-aware context
-
-- **Workspace Documentation** (`.pecs/README.md`, `.pecs/README_WORKSPACE_PREPARATION.md`)
-  - Bootstrap checkpoint confirming successful installation
-  - Comprehensive setup and troubleshooting guide
-
-- **PECS Artifacts** (`.pecs/` directory structure)
-  - Continuity snapshots
-  - Active context tracking
-  - Topology artifacts
-
-#### Verify Installation
-
-```bash
-pecs verify-workspace "/path/to/your/workspace"
-```
-
-Expected output:
-
-```
-Verification: PASSED
-✓ .pecs/WORKSPACE_BOOTSTRAP.md
-✓ .pecs/README.md
-✓ .github/copilot-instructions.md
-✓ .continue/rules/pecs-first-routing.yaml
-... (and more)
-```
-
-### Upgrade an Existing Workspace
-
-To update PECS assets while preserving your configurations:
-
-```bash
-pecs install-workspace-assets "/path/to/your/workspace" --upgrade
-```
-
-### Repair a Broken Installation
-
-If assets are missing or configuration is broken:
-
-```bash
-pecs repair-workspace "/path/to/your/workspace"
-```
-
-### Troubleshooting
-
-#### Check Daemon Status
-
-```bash
-pecs status "/path/to/your/workspace"
-```
-
-#### Full Diagnostics
-
-```bash
-pecs doctor "/path/to/your/workspace" --verbose
-```
-
-#### Available Commands
-
-```bash
-pecs --help
-```
-
-Commands:
-
-- `install-workspace-assets` — Deploy PECS to a workspace
-- `verify-workspace` — Verify installation
-- `repair-workspace` — Repair broken installations
-- `status` — Check daemon status
-- `doctor` — Diagnose environment and installation
-- `PECS: Manual Update Chat History`
-
-The installed task commands automatically run the workspace environment setup when present:
-
-```bash
-cd "${workspaceFolder}"
-source .venv/bin/activate
-```
-
-Bridge/runtime artifacts are installed minimally under:
-
-```text
-.pecs/
-	continuity/
-	runtime/
-	config/
-	bridge/
-```
-
-## Minimal Invocation Flow
-
-You can run PECS as a minimal deterministic flow:
-
-```bash
-pecs-pro init /path/to/your/workspace
-pecs-pro refresh /path/to/your/workspace
-pecs-pro validate /path/to/your/workspace
-```
-
-Equivalent workspace-local bridge invocation:
-
-```bash
-python3 .pecs/bridge/run_bridge.py refresh --workspace /path/to/your/workspace
-python3 .pecs/bridge/run_bridge.py validate --workspace /path/to/your/workspace
-```
-
-PECS favors deterministic continuity stabilization over conversational memory systems.
-The bridge remains intentionally lightweight and non-semantic.
-
-## VS Code Task Workflow
-
-After initialization, PECS tasks become available in VS Code.
-
-Workflow:
-
-- VSCode
-- Terminal
-- Run Task
-- select a PECS task
-
-Expected PECS task names:
+Expected tasks after bootstrap:
 
 - `PECS: Start Daemon`
 - `PECS: Stop Daemon`
@@ -761,96 +420,124 @@ Expected PECS task names:
 - `PECS: Validate Continuity State`
 - `PECS: Append Chat Event`
 - `PECS: Manual Update Chat History`
-- `PECS: Auto Start Daemon On Folder Open` (optional)
+- `PECS: Auto Start Daemon On Folder Open`
 
-## Daemon Lifecycle (Intentional Manual Control)
+Installer-written launchers are workspace local:
 
-The PECS daemon does NOT automatically start from package installation.
-The user manually starts the daemon during active AI-assisted development sessions.
-This is intentional to preserve deterministic and lightweight runtime behavior.
+- `.pecs/run_pecs_daemon.sh`
+- `.pecs/run_pecs_daemon.ps1`
+- `.pecs/run_pecs_daemon.cmd`
 
-## Bridge Lifecycle
+Daemon startup writes `.pecs/daemon.pid` and runtime output to `.pecs/daemon.log`.
 
-Normal users do NOT need to run the context bridge script directly.
-Use standard PECS refresh flow (`pecs-pro refresh` or `PECS: Refresh Continuity State`).
-Daemon/refresh operational flow is the supported path.
-Bridge execution is handled automatically by the daemon/refresh flow.
+### Multi-workspace runtime expectations
 
-The bridge remains:
+PECS supports multi-workspace usage from one install root.
+Each workspace keeps its own `.pecs` runtime state, daemon PID/logs, bridge state, and continuity artifacts.
+Workspace launchers and bridge scripts resolve runtime paths through `.pecs/config/install_root.json`.
 
-- lightweight
-- deterministic
-- non-semantic
+### Expected `.pecs/` structure (current runtime)
 
-## No-Op Silence (Expected Behavior)
+```text
+.pecs/
+   bridge/
+   config/
+   continuity/
+   logs/
+   runtime/
+   tools/
+   active_context.json
+   compact_bundle.json
+   topology_compact.json
+   locality_index.json
+   continuity_refresh_state.json
+   ai_chat_history.json
+   daemon.pid
+   daemon.log
+```
 
-After stabilization, PECS intentionally becomes mostly silent.
+## Runtime Trigger Flow
 
-No-op cycles are expected to produce:
+Current trigger chain:
 
-- no rewrites
-- no log spam
-- no continuity churn
+workspace activity
+-> daemon detection
+-> topology rebuild
+-> projection refresh
+-> continuity refresh
+-> bridge export
 
-This is intentional and indicates deterministic steady-state behavior.
+Runtime events can be generated by file changes, Copilot/Continue chat activity, or runtime activation updates.
 
-## New AI Session Workflow
+## Runtime Observability
 
-For a new AI session, provide:
+PECS daemon observability is workspace-local under `.pecs/logs/`.
 
-- current task/problem
-- `.pecs` continuity state
+Primary log files:
 
-Prefer this over large historical chat dumps.
+- `.pecs/logs/daemon_activity.log`
+- `.pecs/logs/continuity_sync.log`
+- `.pecs/logs/daemon_errors.log`
 
-PECS exists to reduce:
+Behavior:
 
-- continuity collapse
-- search entropy
-- edit locality ambiguity
+- Structured JSONL (one JSON object per line)
+- UTC `ts` field, `event`, and `details`
+- Trigger-chain tracing from detection to bridge execution
+- Lightweight rotating logs (256 KB max file, backup count 3)
 
-Chat-history replay is optional and experimental.
-Deterministic `.pecs` continuity state should be the primary handoff.
+Representative events include:
+
+- activity: `file_change_detected`, `copilot_activity_detected`, `continue_activity_detected`, `continuity_refresh_started`, `bridge_execution_succeeded`
+- continuity: `projection_refresh_started`, `projection_refresh_completed`, `projection_skipped`, `projection_no_changes`, `continuity_noop`
+- errors: `continuity_extraction_failed`, `projection_refresh_failed`, `bridge_execution_failed`
+
+## Active Continuity Artifacts
+
+Current primary runtime artifacts:
+
+- `active_context.json`
+- `compact_bundle.json`
+- `topology_compact.json`
+- `locality_index.json`
+- `continuity_refresh_state.json`
+
+These are refreshed by daemon topology/runtime cycles and bridge refresh execution.
+
+## Bridge Refresh Behavior
+
+Bridge refresh is run by the daemon through workspace-local bridge runners:
+
+- `.pecs/bridge/run_bridge.sh` (preferred when executable)
+- `.pecs/bridge/run_bridge.py` (fallback)
+
+Refresh state is persisted in `continuity_refresh_state.json` with `trigger`, `reason`, `status`, and timestamps.
+Manual refresh remains available through `pecs refresh` or `PECS: Refresh Continuity State`.
+
+## AI Continuity Extraction Behavior
+
+Daemon continuity extraction reads `.pecs/ai_chat_history.json` and emits extraction diagnostics/events to `continuity_sync.log`.
+Chat-history replay remains optional and experimental.
+Deterministic `.pecs` continuity artifacts remain the primary handoff for runtime locality context.
+
+## Runtime Notes
+
+- Observability timestamps are UTC ISO 8601.
+- Continuity refresh is throttled (`continuity_refresh_throttle_seconds`, current default 60s).
+- Throttled refresh attempts are logged as `projection_skipped` with `reason: throttled`.
+- No-op refresh/write paths are expected and logged (`continuity_noop`, `projection_no_changes`).
+- Experimental continuity ingestion remains active; extraction behavior is instrumented but still being evaluated for downstream influence.
+
+## Current Validation Status
+
+- Runtime observability: validated.
+- AI continuity extraction: partially validated.
+- Downstream AI behavioral influence: still under evaluation.
 
 ---
 
 For manual setup procedures, see `README_MANUAL_SETUP.md`.
 For optional chat-history workflows, see `README_AI_CHAT_HISTORY.md`.
-
-## Running the daemon
-
-After installing PECS, start the live continuity daemon for a workspace:
-
-```bash
-pecs-pro-daemon /path/to/your/workspace
-```
-
-If you are running from source without an installed package, use the repository venv Python:
-
-```bash
-cd /path/to/PECS
-source .venv/bin/activate
-python -m run_pecs_daemon /path/to/your/workspace
-```
-
-The daemon creates and updates a disposable `.pecs/` directory inside the monitored workspace.
-
-## Notes
-
-- Installing the package does not automatically start the daemon.
-- The daemon must be running for `.pecs/` artifacts to be generated.
-- `.pecs/` is cache-only and disposable.
-- Do not edit `.pecs/` manually.
-
-## Recommended workflow
-
-1. Install PECS-PRO in editable mode.
-2. Start the daemon before editing the target workspace.
-3. Make sure `.pecs/` is present and being updated.
-4. Periodically export continuity state from `.pecs/` into compact continuity snapshots.
-5. Consume `.pecs/` JSON exports from tooling or integrations.
-
-New projects benefit from early continuity initialization so topology anchors and continuity snapshots exist before sessions become fragmented.
 
 ## PECS-LITE Design Principle: Projection Discipline
 

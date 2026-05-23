@@ -493,10 +493,17 @@ class ProjectionHardener:
 
         progressive_disclosure_applied = False
         highest_confidence = primary[0].confidence if primary else 0.0
+        runtime_interaction_present = any(
+            getattr(item, "evidence_type", "") == "runtime_interaction"
+            for item in scored_targets
+        )
 
         # Progressive locality disclosure for weak-confidence small profile projections.
-        if profile == ProjectionProfile.SMALL and (
-            len(primary) < 2 or highest_confidence < 0.78
+        # Only widen when runtime interaction evidence is not already available.
+        if (
+            profile == ProjectionProfile.SMALL
+            and (len(primary) < 2 or highest_confidence < 0.78)
+            and not runtime_interaction_present
         ):
             widened: List[ConfidenceScore] = []
             existing = {item.file_path for item in primary}

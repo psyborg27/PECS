@@ -76,6 +76,42 @@
       "description": "PECS chat append guidance for Continue"
     },
     {
+      "id": "continuity_map",
+      "source": ".continue/rules/CONTINUITY_MAP.md",
+      "target": ".continue/rules/CONTINUITY_MAP.md",
+      "merge_strategy": "create_if_missing",
+      "required": false,
+      "create_dirs": true,
+      "description": "Continuity map placeholder for live convergence tracking"
+    },
+    {
+      "id": "pecs_coding_protocol",
+      "source": ".continue/rules/PECS_CODING_PROTOCOL.md",
+      "target": ".continue/rules/PECS_CODING_PROTOCOL.md",
+      "merge_strategy": "create_if_missing",
+      "required": false,
+      "create_dirs": true,
+      "description": "PECS coding protocol guidance for Continue"
+    },
+    {
+      "id": "pecs_prompt",
+      "source": ".continue/rules/PECS_PROMPT.md",
+      "target": ".continue/rules/PECS_PROMPT.md",
+      "merge_strategy": "create_if_missing",
+      "required": false,
+      "create_dirs": true,
+      "description": "PECS prompt authority guidance for Continue"
+    },
+    {
+      "id": "live_context",
+      "source": ".continue/rules/live-context.md",
+      "target": ".continue/rules/live-context.md",
+      "merge_strategy": "create_if_missing",
+      "required": false,
+      "create_dirs": true,
+      "description": "Live context guidance for PECS middleware"
+    },
+    {
       "id": "pecs_readme",
       "source": ".pecs/README.md",
       "target": ".pecs/README.md",
@@ -142,6 +178,7 @@
       ".pecs/tools/append_ai_chat_history.py",
       ".pecs/bridge/run_bridge.py",
       ".github/copilot-instructions.md",
+      ".continue/config.yaml",
       ".continue/rules/pecs-first-routing.yaml",
       ".vscode/tasks.json"
     ],

@@ -72,6 +72,14 @@ class LocalityActivationEngine:
         "inactive_overlay",
     )
 
+    _WRAPPER_SURFACE_HINTS = (
+        "wrapper",
+        "adapter",
+        "bridge",
+        "cli",
+        "launcher",
+    )
+
     _ZONE_KEYWORDS: Dict[str, Set[str]] = {
         "dock_pipeline": {"dock", "pane", "sidebar"},
         "notes_pipeline": {"note", "notes", "sticky"},
@@ -192,8 +200,16 @@ class LocalityActivationEngine:
             normalized = self._normalize_edited_path(path)
             if not normalized:
                 continue
+
+            edit_weight = self.RECENT_EDIT_WEIGHT
+            if self._looks_wrapper_surface(normalized):
+                edit_weight *= 0.45
+                activation_reasons[normalized].append(
+                    "wrapper_surface_recent_edit_downweighted"
+                )
+
             if self._recent_edit_is_plausible(normalized, issue_terms, preferred_zones):
-                candidate_scores[normalized] += self.RECENT_EDIT_WEIGHT
+                candidate_scores[normalized] += edit_weight
                 activation_reasons[normalized].append("recent_edit_reinforcement")
             else:
                 discarded_candidates.append(
@@ -217,6 +233,11 @@ class LocalityActivationEngine:
             continuity_weight = self.SESSION_CONTINUITY_WEIGHT
             if normalized not in runtime_confirmed:
                 continuity_weight *= 0.45
+            if self._looks_wrapper_surface(normalized) and normalized not in runtime_confirmed:
+                continuity_weight *= 0.7
+                activation_reasons[normalized].append(
+                    "wrapper_surface_session_downweighted"
+                )
             candidate_scores[normalized] += continuity_weight
             activation_reasons[normalized].append("current_session_continuity")
 
@@ -313,6 +334,20 @@ class LocalityActivationEngine:
                 "zone_scores": {
                     zone: round(score, 3) for zone, score in sorted(zone_scores.items())
                 },
+                "wrapper_selected_count": len(
+                    [
+                        detail
+                        for detail in object_details
+                        if self._looks_wrapper_surface(str(detail.get("pecs_id", "")))
+                    ]
+                ),
+                "runtime_confirmed_selected_count": len(
+                    [
+                        detail
+                        for detail in object_details
+                        if bool(detail.get("runtime_confirmed", False))
+                    ]
+                ),
                 "discarded_candidates": discarded_candidates[:80],
                 "candidate_count": len(candidate_scores),
                 "selected_count": len(selected_objects),
@@ -405,6 +440,10 @@ class LocalityActivationEngine:
     def _looks_inactive_module(self, object_id: str) -> bool:
         lowered = object_id.lower()
         return any(token in lowered for token in self._INACTIVE_MODULE_HINTS)
+
+    def _looks_wrapper_surface(self, object_id: str) -> bool:
+        lowered = object_id.lower()
+        return any(token in lowered for token in self._WRAPPER_SURFACE_HINTS)
 
     def _execution_depth_for_event(self, event_type: str, source: bool) -> str:
         if event_type in {"signal_slot_activation", "dispatch"}:

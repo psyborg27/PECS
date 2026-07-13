@@ -4,6 +4,7 @@ import ast
 import errno
 import hashlib
 import importlib.metadata
+import inspect
 import json
 import logging
 import os
@@ -19,12 +20,19 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 from ..locality_activation_engine import LocalityActivationEngine
 from ..runtime_activation_logger import RuntimeActivationLogger
+from ..runtime_telemetry import RuntimeTelemetryEmitter
 from topology.archaeology.continuity_archaeology import ContinuityArchaeology
 from topology.compaction.compact_context_builder import CompactContextBuilder
 from topology.locality_traversal import LocalityTraversal
 from topology.runtime_edge_reinforcement import RuntimeEdgeReinforcement
 from topology.topology_edge_weights import edge_weight
 from ..session.workspace_runtime_session import WorkspaceRuntimeSession
+from execution_graph.builders.workspace_graph_builder import WorkspaceGraphBuilder
+from execution_graph.graph.workspace_graph import Graph
+from validation.workspace_graph_validator import WorkspaceGraphValidator
+from workspace_registry.builders.workspace_registry_builder import WorkspaceRegistryBuilder
+from validation.workspace_registry_validator import WorkspaceRegistryValidator
+from evidence_correlation.engines.evidence_correlator import EvidenceCorrelator
 
 # Keep watchdog imports at module scope so nested handlers can always resolve.
 try:
@@ -89,6 +97,8 @@ class WorkspaceContinuityDaemon:
     artifact_dir: Path = field(init=False)
     observer: Optional[object] = field(default=None, init=False)
     current_changes: Set[Path] = field(default_factory=set, init=False)
+    dump_workspace_graph: bool = False
+    dump_workspace_registry: bool = False
     pid_file_name: str = "daemon.pid"
     cycle_lock_name: str = "daemon.lock"
     cycle_lock_ttl_seconds: int = 180
@@ -114,19 +124,37 @@ class WorkspaceContinuityDaemon:
     _last_continuity_refresh_timestamp: Optional[float] = field(default=None, init=False)
     _last_continuity_refresh_status: str = field(default="", init=False)
     _cycle_lock_owned: bool = field(default=False, init=False)
+    _recent_python_changes: Deque[str] = field(
+        default_factory=lambda: deque(maxlen=80), init=False
+    )
+    _last_changed_python_files: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.resolve()
         self.artifact_dir = self.workspace_root / self.artifact_dir_name
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.runtime_telemetry = RuntimeTelemetryEmitter(self.workspace_root)
         self._init_observability()
         self.runtime_activation_logger = RuntimeActivationLogger(self.artifact_dir)
         self.locality_activation_engine = LocalityActivationEngine(
             self.runtime_activation_logger
         )
+        self.runtime_telemetry.emit_runtime_event(
+            subsystem="STARTUP",
+            event="daemon_initialized",
+            payload={
+                "workspace_root": str(self.workspace_root),
+                "artifact_dir": str(self.artifact_dir),
+            },
+        )
         self.edge_reinforcement = RuntimeEdgeReinforcement()
         self.locality_traversal = LocalityTraversal()
         self.continuity_archaeology = ContinuityArchaeology()
+        self.workspace_graph_builder = WorkspaceGraphBuilder(self.workspace_root)
+        self.workspace_graph_validator = WorkspaceGraphValidator()
+        self.workspace_registry_builder = WorkspaceRegistryBuilder(self.workspace_root)
+        self.workspace_registry_validator = WorkspaceRegistryValidator()
+        self.evidence_correlator: Optional[EvidenceCorrelator] = None
         self.runtime_snapshot_dir = self.artifact_dir / "runtime_topology_snapshots"
         self.runtime_snapshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -155,6 +183,33 @@ class WorkspaceContinuityDaemon:
 
     def _current_iso_ts(self) -> str:
         return datetime.utcnow().isoformat() + "Z"
+
+    def _emit_runtime_telemetry(
+        self,
+        subsystem: str,
+        event: str,
+        payload: Optional[Dict[str, Any]] = None,
+        file: Optional[str] = None,
+        function: Optional[str] = None,
+    ) -> None:
+        try:
+            if file is None or function is None:
+                frame = inspect.currentframe()
+                caller_frame = frame.f_back if frame is not None else None
+                if caller_frame is not None:
+                    code = caller_frame.f_code
+                    file = file or Path(code.co_filename).name
+                    function = function or code.co_name
+
+            self.runtime_telemetry.emit_runtime_event(
+                subsystem=subsystem,
+                event=event,
+                payload=payload,
+                file=file,
+                function=function,
+            )
+        except Exception:
+            pass
 
     def _rotate_log(self, path: Path) -> None:
         try:
@@ -305,6 +360,14 @@ class WorkspaceContinuityDaemon:
         )
         print(message)
         LOG.info(message)
+        self._emit_runtime_telemetry(
+            subsystem="STARTUP",
+            event="daemon_started",
+            payload={
+                "workspace_root": str(self.workspace_root),
+                "pid": os.getpid(),
+            },
+        )
 
         try:
             while True:
@@ -373,6 +436,11 @@ class WorkspaceContinuityDaemon:
                 "file_change_detected",
                 {"path": str(file_path.relative_to(self.workspace_root))},
             )
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE",
+                event="file_change_detected",
+                payload={"path": str(file_path.relative_to(self.workspace_root))},
+            )
         except Exception:
             pass
         self._process_changes()
@@ -401,6 +469,8 @@ class WorkspaceContinuityDaemon:
             if not python_changed_files:
                 return
 
+            self._record_python_change_intent(python_changed_files)
+
             # Rebuild from runtime topology roots (entrypoints), not filesystem-wide inventory.
             self._rebuild_runtime_topology(changed_files=python_changed_files)
         except Exception as exc:
@@ -413,10 +483,40 @@ class WorkspaceContinuityDaemon:
             )
             raise
 
+    def _record_python_change_intent(self, changed_files: List[Path]) -> None:
+        normalized: List[str] = []
+        for path in changed_files:
+            try:
+                rel = str(path.relative_to(self.workspace_root))
+            except Exception:
+                continue
+            rel = rel.replace("\\", "/").strip()
+            if rel and rel not in normalized:
+                normalized.append(rel)
+
+        for rel in normalized:
+            self._recent_python_changes.append(rel)
+
+        # Keep a bounded ordered snapshot for deterministic artifact export.
+        deduped_recent: List[str] = []
+        for rel in reversed(list(self._recent_python_changes)):
+            if rel not in deduped_recent:
+                deduped_recent.append(rel)
+            if len(deduped_recent) >= 40:
+                break
+
+        self._last_changed_python_files = list(reversed(deduped_recent))
+        self.runtime_session.session_metadata["recent_changed_files"] = list(
+            self._last_changed_python_files
+        )
+
     def _rebuild_runtime_topology(
         self,
         changed_files: Optional[List[Path]] = None,
     ) -> None:
+        if changed_files:
+            self._record_python_change_intent(changed_files)
+
         self._log_activity(
             "topology_rebuild_started",
             {
@@ -426,9 +526,23 @@ class WorkspaceContinuityDaemon:
                 ],
             },
         )
+        self._emit_runtime_telemetry(
+            subsystem="CONTINUITY",
+            event="topology_rebuild_started",
+            payload={
+                "changed_files": [
+                    str(path.relative_to(self.workspace_root))
+                    for path in (changed_files or [])
+                ],
+            },
+        )
         entrypoints = self._discover_entrypoints()
         reachable_files = self._resolve_runtime_reachable_files(entrypoints)
         self._populate_runtime_indexes(reachable_files)
+        self._build_and_validate_workspace_graph(
+            reachable_files,
+            entrypoints,
+        )
 
         focus = self._infer_active_focus_from_chat()
         activation = self._infer_locality_activation(focus)
@@ -462,6 +576,7 @@ class WorkspaceContinuityDaemon:
             {
                 "workspace_root": str(self.workspace_root),
                 "artifact_dir": str(self.artifact_dir),
+                "changed_files": list(self._last_changed_python_files),
                 "runtime_reachable_count": len(self.runtime_reachable_files),
                 "topology_edge_count": len(self.runtime_topology_edges),
                 "runtime_locality_payload_count": len(self.runtime_locality_payload),
@@ -510,11 +625,186 @@ class WorkspaceContinuityDaemon:
                 "topology_edge_count": len(self.runtime_topology_edges),
             },
         )
+        self._emit_runtime_telemetry(
+            subsystem="CONTINUITY",
+            event="topology_rebuild_completed",
+            payload={
+                "runtime_reachable_files": len(self.runtime_reachable_files),
+                "topology_edge_count": len(self.runtime_topology_edges),
+                "locality_payload_count": len(self.runtime_locality_payload),
+            },
+        )
 
         if self.runtime_locality_payload:
             self._run_continuity_refresh(
                 trigger="runtime_topology",
                 reason="runtime topology rebuild",
+            )
+
+    def _build_and_validate_workspace_graph(
+        self,
+        reachable_files: Set[Path],
+        entrypoints: List[Path],
+    ) -> None:
+        """
+        Build the Workspace Graph from the same data used to populate
+        legacy indexes, assign it to the runtime session, and validate
+        it against the legacy indexes.
+
+        This is additive: no legacy consumer is changed.
+        """
+        try:
+            graph = self.workspace_graph_builder.build(
+                reachable_files=reachable_files,
+                runtime_locality_payload=self.runtime_locality_payload,
+                runtime_topology_edges=self.runtime_topology_edges,
+                entrypoints=entrypoints,
+                graph_index=self.runtime_session.graph_index,
+                execution_index=self.runtime_session.execution_index,
+                ownership_index=self.runtime_session.topology_retriever.ownership_index,
+                locality_index=self.runtime_session.locality_index,
+                runtime_path_index=None,
+            )
+            self.runtime_session.set_workspace_graph(graph)
+
+            report = self.workspace_graph_validator.validate(
+                graph,
+                graph_index=self.runtime_session.graph_index,
+                execution_index=self.runtime_session.execution_index,
+                ownership_index=self.runtime_session.topology_retriever.ownership_index,
+                locality_index=self.runtime_session.locality_index,
+            )
+
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_GRAPH",
+                event="workspace_graph_built",
+                payload={
+                    "node_count": len(graph.nodes),
+                    "edge_count": len(graph.edges),
+                    "graph_hash": graph.metadata.graph_hash,
+                    "validation_valid": report.valid,
+                    "validation_mismatch_count": len(report.mismatches),
+                },
+            )
+
+            if self.dump_workspace_graph:
+                self._write_json(
+                    "workspace_graph.json",
+                    graph.to_dict(),
+                )
+                self._write_json(
+                    "workspace_graph_validation.json",
+                    report.to_dict(),
+                )
+
+            self._build_and_validate_workspace_registry(graph)
+        except Exception as exc:
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_GRAPH",
+                event="workspace_graph_build_failed",
+                payload={"error": str(exc)},
+            )
+            LOG.warning(
+                "Workspace graph build/validation failed: %s",
+                exc,
+            )
+
+    def _build_and_validate_workspace_registry(
+        self,
+        graph: Graph,
+    ) -> None:
+        """
+        Build the deterministic Workspace Registry from the Workspace Graph,
+        attach it to the runtime session, and validate coverage.
+
+        Feature projections are not implemented here; the registry is the
+        authority for future projection engines.
+        """
+        try:
+            registry = self.workspace_registry_builder.build(graph)
+            self.runtime_session.set_workspace_registry(registry)
+            self._build_evidence_correlation_index(graph, registry)
+
+            registry_report = self.workspace_registry_validator.validate(
+                registry,
+                graph,
+            )
+
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_REGISTRY",
+                event="workspace_registry_built",
+                payload={
+                    "feature_count": len(registry.features),
+                    "infrastructure_unit_count": len(
+                        registry.infrastructure_units
+                    ),
+                    "registry_hash": registry.metadata.registry_hash,
+                    "validation_valid": registry_report.valid,
+                    "validation_mismatch_count": len(
+                        registry_report.mismatches
+                    ),
+                },
+            )
+
+            if self.dump_workspace_registry:
+                self._write_json(
+                    "workspace_registry.json",
+                    registry.to_dict(),
+                )
+                self._write_json(
+                    "workspace_registry_validation.json",
+                    registry_report.to_dict(),
+                )
+        except Exception as exc:
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_REGISTRY",
+                event="workspace_registry_build_failed",
+                payload={"error": str(exc)},
+            )
+            LOG.warning(
+                "Workspace registry build/validation failed: %s",
+                exc,
+            )
+
+    def _build_evidence_correlation_index(
+        self,
+        graph: Graph,
+        registry: Any,
+    ) -> None:
+        """
+        Build the deterministic Evidence Correlation index from the frozen
+        Workspace Graph and Workspace Registry.
+
+        The correlator is attached to the runtime session so future queries
+        can be answered incrementally without rebuilding.
+        """
+        try:
+            correlator = EvidenceCorrelator(
+                workspace_root=self.workspace_root,
+                graph=graph,
+                registry=registry,
+                locality_payload=self.runtime_locality_payload,
+            )
+            correlator.build_index()
+            self.evidence_correlator = correlator
+            self.runtime_session.set_evidence_correlator(correlator)
+
+            self._emit_runtime_telemetry(
+                subsystem="EVIDENCE_CORRELATION",
+                event="evidence_correlation_index_built",
+                payload={
+                    "indexed_nodes": len(correlator._evidence or {}),
+                },
+            )
+        except Exception as exc:
+            self._emit_runtime_telemetry(
+                subsystem="EVIDENCE_CORRELATION",
+                event="evidence_correlation_index_failed",
+                payload={"error": str(exc)},
+            )
+            LOG.warning(
+                "Evidence correlation index build failed: %s",
+                exc,
             )
 
     def _discover_entrypoints(self) -> List[Path]:
@@ -568,6 +858,14 @@ class WorkspaceContinuityDaemon:
             self._log_continuity(
                 "workspace_filter_applied",
                 {
+                    "excluded_path_count": len(excluded_paths),
+                    "example_excluded_paths": sorted(list(excluded_paths))[:8],
+                },
+            )
+            self._emit_runtime_telemetry(
+                subsystem="LOCALITY_AUTHORITY",
+                event="workspace_filter_applied",
+                payload={
                     "excluded_path_count": len(excluded_paths),
                     "example_excluded_paths": sorted(list(excluded_paths))[:8],
                 },
@@ -663,6 +961,13 @@ class WorkspaceContinuityDaemon:
         self.runtime_locality_payload.clear()
         self.runtime_topology_edges = []
 
+        self.runtime_session.session_metadata["previous_active_objects"] = sorted(
+            self.runtime_session.active_objects
+        )[:160]
+        self.runtime_session.session_metadata["previous_active_paths"] = sorted(
+            self.runtime_session.active_paths
+        )[:160]
+
         self.runtime_session.locality_index.object_locality.clear()
         self.runtime_session.locality_index.runtime_locality.clear()
         self.runtime_session.locality_index.ownership_locality.clear()
@@ -685,6 +990,8 @@ class WorkspaceContinuityDaemon:
 
             class_name, method_name = self._extract_symbol_metadata(path)
             runtime_zone = self._runtime_zone_for_path(path)
+            edges = self._extract_runtime_edges(path)
+            runtime_anchor_ids = self._runtime_anchor_ids_from_edges(path, edges)
 
             self.runtime_locality_payload[pecs_id] = {
                 "file": str(path.relative_to(self.workspace_root)),
@@ -698,6 +1005,14 @@ class WorkspaceContinuityDaemon:
                 anchors.append(f"{pecs_id}.{class_name}")
             if method_name:
                 anchors.append(f"{pecs_id}.{method_name}")
+            for runtime_anchor in sorted(runtime_anchor_ids):
+                anchors.append(runtime_anchor)
+                self.runtime_locality_payload[runtime_anchor] = {
+                    "file": str(path.relative_to(self.workspace_root)),
+                    "class": class_name,
+                    "method": method_name,
+                    "runtime_zone": runtime_zone,
+                }
 
             self.runtime_session.locality_index.register_object_locality(
                 object_id, anchors
@@ -726,12 +1041,57 @@ class WorkspaceContinuityDaemon:
             self.runtime_session.active_objects.add(object_id)
             self.runtime_session.active_paths.add(path_id)
 
-            for edge in self._extract_runtime_edges(path):
+            for runtime_anchor in sorted(runtime_anchor_ids):
+                self.runtime_session.locality_index.register_object_locality(
+                    runtime_anchor,
+                    [pecs_id],
+                )
+                self.runtime_session.locality_index.runtime_locality[runtime_anchor] = [pecs_id]
+                self.runtime_session.locality_index.ownership_locality[runtime_anchor] = [pecs_id]
+                self.runtime_session.topology_retriever.ownership_index.register_ownership_locality(
+                    runtime_anchor,
+                    [pecs_id],
+                )
+                self.runtime_session.active_objects.add(runtime_anchor)
+
+            qaction_count = 0
+            qaction_ownership_count = 0
+            signal_slot_count = 0
+            dialog_launch_count = 0
+            subprocess_launch_count = 0
+
+            for edge in edges:
+                if edge["type"] == "qaction_register":
+                    qaction_count += 1
+                elif edge["type"] == "qaction_ownership":
+                    qaction_ownership_count += 1
+                elif edge["type"] == "signal_slot":
+                    signal_slot_count += 1
+                elif edge["type"] == "dialog_launch":
+                    dialog_launch_count += 1
+                elif edge["type"] == "subprocess_launch":
+                    subprocess_launch_count += 1
+
                 key = (edge["from"], edge["to"], edge["type"])
                 if key in edge_seen:
                     continue
                 edge_seen.add(key)
                 self.runtime_topology_edges.append(edge)
+
+            if qaction_count or qaction_ownership_count or signal_slot_count or dialog_launch_count or subprocess_launch_count:
+                self._emit_runtime_telemetry(
+                    subsystem="RUNTIME_REGISTRATION",
+                    event="qaction_ownership_reconstructed",
+                    payload={
+                        "qaction_register_count": qaction_count,
+                        "qaction_ownership_count": qaction_ownership_count,
+                        "signal_slot_count": signal_slot_count,
+                        "dialog_launch_count": dialog_launch_count,
+                        "subprocess_launch_count": subprocess_launch_count,
+                        "path": str(path.relative_to(self.workspace_root)),
+                    },
+                )
+
 
     def _extract_runtime_edges(self, path: Path) -> List[Dict[str, str]]:
         edges: List[Dict[str, str]] = []
@@ -749,31 +1109,114 @@ class WorkspaceContinuityDaemon:
         source = ""
         try:
             source = path.read_text(encoding="utf-8", errors="ignore")
+            tree = ast.parse(source)
         except Exception:
             return edges
 
+        qaction_factories = self._discover_qaction_factories(tree)
+        qaction_vars: Set[str] = set()
+        qshortcut_vars: Set[str] = set()
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                names = [self._extract_name(target) for target in node.targets]
+                values = [name for name in names if name]
+                if not values:
+                    continue
+
+                if self._is_qaction_call(node.value):
+                    for action_var in values:
+                        qaction_vars.add(action_var)
+                        edges.append(
+                            {
+                                "from": source_id,
+                                "to": f"PECS_ID:action.{action_var}",
+                                "type": "qaction_register",
+                            }
+                        )
+                elif self._is_qshortcut_call(node.value):
+                    for shortcut_var in values:
+                        qshortcut_vars.add(shortcut_var)
+                        edges.append(
+                            {
+                                "from": source_id,
+                                "to": f"PECS_ID:shortcut.{shortcut_var}",
+                                "type": "shortcut_register",
+                            }
+                        )
+                elif self._is_action_factory_call(node.value, qaction_factories):
+                    for action_var in values:
+                        qaction_vars.add(action_var)
+                        edges.append(
+                            {
+                                "from": source_id,
+                                "to": f"PECS_ID:action.{action_var}",
+                                "type": "qaction_factory_register",
+                            }
+                        )
+
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                call = node.value
+                if self._is_connect_call(call):
+                    source_anchor = self._extract_connect_source(call.func, qaction_vars, qshortcut_vars)
+                    target_anchor = self._extract_connect_target(call)
+                    if source_anchor and target_anchor:
+                        edges.append(
+                            {
+                                "from": source_anchor,
+                                "to": target_anchor,
+                                "type": "signal_slot",
+                            }
+                        )
+                if self._is_qaction_ownership_call(call):
+                    action_var = self._extract_action_argument(call)
+                    if action_var:
+                        edges.append(
+                            {
+                                "from": source_id,
+                                "to": f"PECS_ID:action.{action_var}",
+                                "type": "qaction_ownership",
+                            }
+                        )
+                if self._is_shortcut_ownership_call(call):
+                    shortcut_var = self._extract_action_argument(call)
+                    if shortcut_var:
+                        edges.append(
+                            {
+                                "from": source_id,
+                                "to": f"PECS_ID:shortcut.{shortcut_var}",
+                                "type": "shortcut_ownership",
+                            }
+                        )
+
+        # Preserve legacy regex extraction for narrow compatibility while adding broader AST capture.
         for action_var in re.findall(r"\b(\w+)\s*=\s*QAction\s*\(", source):
-            target_id = f"PECS_ID:action.{action_var}"
-            edges.append(
-                {
-                    "from": source_id,
-                    "to": target_id,
-                    "type": "qaction_register",
-                }
-            )
+            if f"PECS_ID:action.{action_var}" not in {edge["to"] for edge in edges if edge["type"] == "qaction_register"}:
+                edges.append(
+                    {
+                        "from": source_id,
+                        "to": f"PECS_ID:action.{action_var}",
+                        "type": "qaction_register",
+                    }
+                )
 
         for action_var, method_name in re.findall(
             r"\b(\w+)\.triggered\.connect\(\s*self\.(\w+)\s*\)",
             source,
         ):
             target_id = f"{source_id}.{method_name}"
-            edges.append(
-                {
-                    "from": f"PECS_ID:action.{action_var}",
-                    "to": target_id,
-                    "type": "signal_slot",
-                }
-            )
+            if {
+                "from": f"PECS_ID:action.{action_var}",
+                "to": target_id,
+                "type": "signal_slot",
+            } not in edges:
+                edges.append(
+                    {
+                        "from": f"PECS_ID:action.{action_var}",
+                        "to": target_id,
+                        "type": "signal_slot",
+                    }
+                )
 
         for method_name in re.findall(
             r"\b(?:open|launch|show)_([A-Za-z_][\w]*)\s*\(", source
@@ -798,6 +1241,184 @@ class WorkspaceContinuityDaemon:
             )
 
         return edges
+
+    def _runtime_anchor_ids_from_edges(
+        self,
+        path: Path,
+        edges: List[Dict[str, str]],
+    ) -> Set[str]:
+        anchors: Set[str] = set()
+        source_id = self._pecs_id_from_path(path)
+        for edge in edges:
+            for direction in ("from", "to"):
+                anchor = str(edge.get(direction, "") or "")
+                if not anchor or anchor == source_id:
+                    continue
+                if self._is_runtime_interaction_anchor(anchor):
+                    anchors.add(anchor)
+        return anchors
+
+    def _is_runtime_interaction_anchor(self, anchor: str) -> bool:
+        return any(
+            anchor.startswith(prefix)
+            for prefix in (
+                "PECS_ID:action.",
+                "PECS_ID:shortcut.",
+                "PECS_ID:callback.",
+                "PECS_ID:dialog.",
+                "PECS_ID:signal.",
+            )
+        )
+
+    def _discover_qaction_factories(self, tree: ast.AST) -> Set[str]:
+        factories: Set[str] = set()
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            returns_qaction = False
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call) and self._is_qaction_call(child):
+                    returns_qaction = True
+                    break
+            if returns_qaction:
+                factories.add(node.name)
+        return factories
+
+    def _extract_name(self, node: ast.AST) -> Optional[str]:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            value = self._extract_name(node.value)
+            if value:
+                return f"{value}.{node.attr}"
+            return node.attr
+        return None
+
+    def _is_qaction_call(self, node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id == "QAction"
+        if isinstance(func, ast.Attribute):
+            return func.attr == "QAction"
+        return False
+
+    def _is_qshortcut_call(self, node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id == "QShortcut"
+        if isinstance(func, ast.Attribute):
+            return func.attr == "QShortcut"
+        return False
+
+    def _is_action_factory_call(self, node: ast.AST, factories: Set[str]) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in factories:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in factories:
+            return True
+        return False
+
+    def _is_connect_call(self, call: ast.Call) -> bool:
+        if not isinstance(call, ast.Call):
+            return False
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr == "connect"
+        return False
+
+    def _extract_connect_source(
+        self, func: ast.AST, qaction_vars: Set[str], qshortcut_vars: Set[str]
+    ) -> Optional[str]:
+        if not isinstance(func, ast.Attribute):
+            return None
+
+        if func.attr != "connect":
+            return None
+
+        signal_object = func.value
+        if isinstance(signal_object, ast.Attribute):
+            base = self._extract_name(signal_object.value)
+            if base:
+                if base in qshortcut_vars:
+                    return f"PECS_ID:shortcut.{base}"
+                if base in qaction_vars:
+                    return f"PECS_ID:action.{base}"
+                return f"PECS_ID:{signal_object.attr}.{base}"
+        if isinstance(signal_object, ast.Name):
+            base = signal_object.id
+            if base in qshortcut_vars:
+                return f"PECS_ID:shortcut.{base}"
+            if base in qaction_vars:
+                return f"PECS_ID:action.{base}"
+            return f"PECS_ID:signal.{base}"
+        return None
+
+    def _extract_connect_target(self, call: ast.Call) -> Optional[str]:
+        if not call.args:
+            return None
+        target = call.args[0]
+        if isinstance(target, ast.Name):
+            return f"PECS_ID:callback.{target.id}"
+        if isinstance(target, ast.Attribute):
+            name = self._extract_name(target)
+            return f"PECS_ID:callback.{name.replace('.', '_')}"
+        if isinstance(target, ast.Lambda):
+            return f"PECS_ID:callback.lambda.{target.lineno}"
+        if isinstance(target, ast.Call):
+            if self._is_partial_call(target):
+                return self._extract_partial_callable(target)
+            return self._extract_connect_target(target)
+        return None
+
+    def _is_partial_call(self, node: ast.Call) -> bool:
+        if isinstance(node.func, ast.Name) and node.func.id == "partial":
+            return True
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "partial":
+            return True
+        return False
+
+    def _extract_partial_callable(self, node: ast.Call) -> Optional[str]:
+        if not node.args:
+            return None
+        target = node.args[0]
+        if isinstance(target, ast.Name):
+            return f"PECS_ID:callback.partial.{target.id}"
+        if isinstance(target, ast.Attribute):
+            name = self._extract_name(target)
+            return f"PECS_ID:callback.partial.{name.replace('.', '_')}"
+        return None
+
+    def _is_qaction_ownership_call(self, call: ast.Call) -> bool:
+        if isinstance(call.func, ast.Attribute):
+            if call.func.attr in {"addAction", "setDefaultAction", "registerAction", "register_action"}:
+                return True
+        if isinstance(call.func, ast.Name):
+            if call.func.id in {"registerAction", "register_action"}:
+                return True
+        return False
+
+    def _is_shortcut_ownership_call(self, call: ast.Call) -> bool:
+        if isinstance(call.func, ast.Attribute):
+            return call.func.attr in {"setShortcut", "registerShortcut", "addShortcut"}
+        if isinstance(call.func, ast.Name):
+            return call.func.id in {"setShortcut", "registerShortcut", "addShortcut"}
+        return False
+
+    def _extract_action_argument(self, call: ast.Call) -> Optional[str]:
+        if not call.args:
+            return None
+        arg = call.args[0]
+        if isinstance(arg, ast.Name):
+            return arg.id
+        if isinstance(arg, ast.Attribute):
+            return self._extract_name(arg)
+        return None
 
     def _extract_symbol_metadata(self, path: Path) -> Tuple[str, str]:
         try:
@@ -953,17 +1574,36 @@ class WorkspaceContinuityDaemon:
         focus: Dict[str, object],
     ) -> Dict[str, object]:
         issue = str(focus.get("current_issue", ""))
-        edited_files = [
-            str(path.relative_to(self.workspace_root))
-            for path in sorted(self.runtime_reachable_files)
-            if path.suffix == ".py"
-        ]
+        edited_files = list(
+            self.runtime_session.session_metadata.get("recent_changed_files", [])
+            if isinstance(self.runtime_session.session_metadata, dict)
+            else []
+        )
+        edit_intent_source = "recent_changed_files"
+        if not edited_files:
+            edited_files = list(self._last_changed_python_files)
+            edit_intent_source = "daemon_recent_changed_files"
+        if not edited_files:
+            edited_files = [
+                str(path.relative_to(self.workspace_root))
+                for path in sorted(self.runtime_reachable_files)
+                if path.suffix == ".py"
+            ]
+            edit_intent_source = "runtime_reachable_fallback"
+
         dissatisfaction = focus.get("dissatisfaction_signals", [])
         active_zone = str(focus.get("active_topology_zone", "general_runtime"))
         historical_fix_locality = self.runtime_session.session_metadata.get(
             "recent_fix_locality", []
         )
-        current_session_objects = sorted(self.runtime_session.active_objects)
+        current_session_objects = list(
+            self.runtime_session.session_metadata.get("previous_active_objects", [])
+            if isinstance(self.runtime_session.session_metadata, dict)
+            else []
+        )
+        if not current_session_objects:
+            current_session_objects = list(historical_fix_locality)
+
         activation = self.locality_activation_engine.infer_locality(
             current_issue=issue,
             edited_files=edited_files,
@@ -972,6 +1612,14 @@ class WorkspaceContinuityDaemon:
             historical_fix_locality=historical_fix_locality,
             current_session_objects=current_session_objects,
         )
+        diagnostics = activation.get("activation_diagnostics", {})
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        diagnostics["edit_intent_source"] = edit_intent_source
+        diagnostics["edited_file_count"] = len(edited_files)
+        diagnostics["historical_session_object_count"] = len(current_session_objects)
+        activation["activation_diagnostics"] = diagnostics
+
         self.edge_reinforcement.reset()
         self.edge_reinforcement.reinforce_edges(activation.get("observed_edges", []))
         return activation
@@ -987,6 +1635,17 @@ class WorkspaceContinuityDaemon:
         self._log_activity(
             "runtime_activation_detected",
             {
+                "event_path": str(
+                    self.runtime_activation_logger.event_path.relative_to(
+                        self.workspace_root
+                    )
+                ),
+            },
+        )
+        self._emit_runtime_telemetry(
+            subsystem="LOCALITY_AUTHORITY",
+            event="runtime_activation_detected",
+            payload={
                 "event_path": str(
                     self.runtime_activation_logger.event_path.relative_to(
                         self.workspace_root
@@ -1063,6 +1722,11 @@ class WorkspaceContinuityDaemon:
             "continuity_refresh_started",
             {"trigger": trigger, "reason": reason},
         )
+        self._emit_runtime_telemetry(
+            subsystem="CONTINUITY",
+            event="continuity_refresh_started",
+            payload={"trigger": trigger, "reason": reason},
+        )
         LOG.info(
             "Starting continuity refresh: trigger=%s reason=%s",
             trigger,
@@ -1087,6 +1751,11 @@ class WorkspaceContinuityDaemon:
                 "continuity_refresh_completed",
                 {"trigger": trigger, "status": "success"},
             )
+            self._emit_runtime_telemetry(
+                subsystem="CONTINUITY",
+                event="continuity_refresh_completed",
+                payload={"trigger": trigger, "status": "success"},
+            )
             LOG.info("Continuity refresh succeeded: trigger=%s", trigger)
         except Exception as exc:
             self._last_continuity_refresh_timestamp = time.time()
@@ -1097,6 +1766,11 @@ class WorkspaceContinuityDaemon:
             self._log_error(
                 "bridge_execution_failed",
                 {"trigger": trigger, "reason": reason, "error": str(exc)},
+            )
+            self._emit_runtime_telemetry(
+                subsystem="CONTINUITY",
+                event="bridge_execution_failed",
+                payload={"trigger": trigger, "reason": reason, "error": str(exc)},
             )
             LOG.warning(
                 "Continuity refresh failed: trigger=%s reason=%s error=%s",
@@ -1157,6 +1831,11 @@ class WorkspaceContinuityDaemon:
         self._log_activity(
             "bridge_execution_succeeded",
             {"cmd": cmd, "stdout": result.stdout.strip()},
+        )
+        self._emit_runtime_telemetry(
+            subsystem="CONTINUITY",
+            event="bridge_execution_succeeded",
+            payload={"cmd": cmd, "stdout": result.stdout.strip()},
         )
         LOG.info("Bridge refresh stdout: %s", result.stdout.strip())
 
@@ -1254,10 +1933,26 @@ class WorkspaceContinuityDaemon:
         ][:120]
 
         active_objects = activation.get("activated_objects", [])
+        previous_active_objects = list(
+            self.runtime_session.session_metadata.get("previous_active_objects", [])
+            if isinstance(self.runtime_session.session_metadata, dict)
+            else []
+        )
+        historical_overlap = [
+            obj for obj in previous_active_objects if obj in set(active_objects)
+        ][:24]
+        historical_residual = [
+            obj for obj in previous_active_objects if obj not in set(active_objects)
+        ][:24]
+
         self.runtime_session.active_objects = set(active_objects)
         self.runtime_session.active_zones = set(
             activation.get("active_runtime_zones", [])
         )
+        self.runtime_session.session_metadata["recent_fix_locality"] = bundle_ids[:24]
+        self.runtime_session.session_metadata[
+            "historical_continuity_overlap"
+        ] = historical_overlap
 
         return {
             "current_issue": focus.get("current_issue", ""),
@@ -1272,6 +1967,14 @@ class WorkspaceContinuityDaemon:
             "activation_confidence": activation.get("activation_confidence", {}),
             "activation_reasons": activation.get("activation_reasons", {}),
             "activation_diagnostics": activation.get("activation_diagnostics", {}),
+            "historical_continuity_gravity": {
+                "previous_active_objects": previous_active_objects[:40],
+                "historical_overlap": historical_overlap,
+                "historical_residual": historical_residual,
+                "recent_fix_locality": list(
+                    self.runtime_session.session_metadata.get("recent_fix_locality", [])
+                )[:24],
+            },
             "recent_locality": bundle_ids[:25],
             "runtime_neighborhood": neighborhood,
             "dissatisfaction_signals": focus.get("dissatisfaction_signals", []),
@@ -1824,15 +2527,13 @@ class WorkspaceContinuityDaemon:
     def _health_status(self) -> Dict[str, object]:
         runtime_ready = bool(self.runtime_locality_payload)
         topology_ready = bool(self.runtime_reachable_files)
-        continuity_ready = runtime_ready and bool(self.runtime_topology_edges)
+        continuity_ready = runtime_ready
         issues: List[str] = []
 
         if not runtime_ready:
             issues.append("runtime locality payload not initialized")
         if not topology_ready:
             issues.append("runtime topology not initialized")
-        if runtime_ready and not continuity_ready:
-            issues.append("continuity graph incomplete")
 
         core_artifacts = {
             "locality_index.json": (self.artifact_dir / "locality_index.json").exists(),

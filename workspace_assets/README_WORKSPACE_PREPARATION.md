@@ -35,6 +35,50 @@ Coding agents should:
 
 PECS-LITE does not scan the workspace or reconstruct runtime topology independently. It queries PECS-PRO continuity outputs and returns compact runtime target projections for the model.
 
+### Canonical Query Workflow
+
+Before any broad repository inspection or architectural reasoning, run the canonical PECS-LITE query command:
+
+```bash
+pecs observe-projection-snapshot "$(pwd)" \
+  --query "stabilization, ownership lookup, continuity locality" \
+  --query-source "copilot" \
+  --model-name "unknown" \
+  --profile-class frontier \
+  --local-vs-frontier frontier
+```
+
+For repeated observation in longer sessions:
+
+```bash
+pecs observe-projection-daemon "$(pwd)" \
+  --query "stabilization, ownership lookup, continuity locality" \
+  --query-source "copilot" \
+  --model-name "unknown" \
+  --profile-class frontier \
+  --local-vs-frontier frontier \
+  --iterations 10 \
+  --interval-seconds 2.0
+```
+
+Use the returned projection first; only then inspect runtime workspace files for bounded edits.
+
+After task completion, refresh PECS artifacts with canonical lifecycle commands:
+
+```bash
+pecs refresh "$(pwd)"
+pecs rebuild-continuity "$(pwd)"
+pecs rebuild-topology "$(pwd)"
+pecs restart-daemon "$(pwd)"
+```
+
+### Required PECS Workflow
+
+1. Query PECS first using the canonical observe-projection commands.
+2. Perform the engineering task with locality and continuity awareness.
+3. Refresh or rebuild PECS artifacts after completion using canonical lifecycle commands.
+4. Never hand-edit `.pecs` artifacts or continuity outputs.
+
 ### PECS Process Flow
 
 1. Install workspace assets to configure VS Code, Continue, Copilot, and `.pecs` infrastructure.

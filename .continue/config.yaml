@@ -1,0 +1,15 @@
+# Continue Integration Configuration (PECS)
+
+rules:
+  - path: rules/pecs-first-routing.yaml
+    alwaysApply: true
+    priority: 100
+
+# PECS MANAGED CONFIG START
+# Continue Integration Configuration (PECS)
+rules:
+  - path: rules/pecs-first-routing.yaml
+    alwaysApply: true
+    priority: 100
+
+# PECS MANAGED CONFIG END

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -255,15 +256,195 @@ def _infer_engineering_continuity_locality(message: str) -> str:
         return "append_ai_chat_history.py"
     return "install_workspace_integration.py"
 
+AUTHORITY_KEYWORDS = [
+    "authority",
+    "canonical",
+    "protected",
+    "stable engineering",
+    "accepted locality",
+    "runtime authority",
+    "continuity anchor",
+]
+PROTECTED_AUTHORITY_KEYWORDS = [
+    "protected",
+    "safe core",
+    "core script",
+    "authority",
+    "protected authority",
+    "canonical owner",
+]
+RECONCILIATION_KEYWORDS = [
+    "reconcile",
+    "reconciliation",
+    "merge",
+    "recover",
+    "hydrate",
+    "restore",
+]
+SUBSYSTEM_KEYWORDS = [
+    "wrapper",
+    "experimental",
+    "v5",
+    "opencv",
+    "pdf",
+    "toc",
+    "ocr",
+    "preprocessing",
+]
+CANONICAL_IMPLEMENTATION_KEYWORDS = [
+    "main app",
+    "ui",
+    "pdf viewer",
+    "auto_toc",
+    "extraction",
+    "core ocr",
+    "pipeline",
+]
+
+
+def _extract_py_file_paths(message: str) -> List[str]:
+    return sorted(
+        {
+            path.replace("\\", "/").strip()
+            for path in re.findall(r"\b[\w./\\-]+\.py\b", str(message or ""))
+            if path.strip()
+        }
+    )
+
+
+def _contains_keyword(message: str, keywords: List[str]) -> bool:
+    text = str(message or "").lower()
+    return any(keyword in text for keyword in keywords)
+
+
+def _scan_backup_lineage(workspace_root: Path) -> Dict[str, object]:
+    backup_root = workspace_root / ".pecs" / "backups"
+    if not backup_root.exists() or not backup_root.is_dir():
+        return {
+            "backup_snapshot_count": 0,
+            "continuity_backup_count": 0,
+            "backup_lineage_density": 0.0,
+        }
+
+    backup_dirs = [p for p in backup_root.iterdir() if p.is_dir()]
+    continuity_backups = 0
+    for backup_dir in backup_dirs:
+        if (backup_dir / ".pecs" / "continuity" / "engineering_continuity_state.json").exists():
+            continuity_backups += 1
+
+    density = min(1.0, 0.08 * continuity_backups + 0.03 * len(backup_dirs))
+    return {
+        "backup_snapshot_count": len(backup_dirs),
+        "continuity_backup_count": continuity_backups,
+        "backup_lineage_density": round(density, 3),
+    }
+
+
+def _build_historical_continuity_summary(
+    entries: List[Dict[str, Any]], workspace_root: Path
+) -> Dict[str, Any]:
+    total_entries = len(entries)
+    message_count = total_entries
+    file_mentions: Counter[str] = Counter()
+    signal_counts: Counter[str] = Counter()
+
+    for entry in entries:
+        message = str(entry.get("message", "") or "").strip()
+        if not message:
+            continue
+        normalized = message.lower()
+        for path in _extract_py_file_paths(message):
+            file_mentions[path] += 1
+        if _contains_keyword(normalized, AUTHORITY_KEYWORDS):
+            signal_counts["authority"] += 1
+        if _contains_keyword(normalized, PROTECTED_AUTHORITY_KEYWORDS):
+            signal_counts["protected_authority"] += 1
+        if _contains_keyword(normalized, RECONCILIATION_KEYWORDS):
+            signal_counts["reconciliation"] += 1
+        if _contains_keyword(normalized, SUBSYSTEM_KEYWORDS):
+            signal_counts["subsystem_continuity"] += 1
+        if _contains_keyword(normalized, CANONICAL_IMPLEMENTATION_KEYWORDS):
+            signal_counts["canonical_implementation"] += 1
+        if _contains_keyword(normalized, ["lineage", "continuity", "authority"]):
+            signal_counts["lineage"] += 1
+
+    cluster_list = _cluster_paths(file_mentions)
+    total_path_mentions = sum(file_mentions.values())
+    top_cluster = cluster_list[0]["count"] if cluster_list else 0
+    fragmentation = 1.0
+    if total_path_mentions:
+        fragmentation = 1.0 - min(1.0, top_cluster / float(total_path_mentions))
+
+    reconstructed_lineage_density = min(
+        1.0,
+        (total_path_mentions / max(total_entries, 1)) * 0.35
+        + min(1.0, signal_counts["lineage"] / max(total_entries, 1)) * 0.25
+        + min(1.0, signal_counts["authority"] / max(total_entries, 1)) * 0.15,
+    )
+    historical_engineering_gravity = min(
+        1.0,
+        0.15
+        + 0.3 * min(1.0, signal_counts["authority"] / max(total_entries, 1))
+        + 0.2 * min(1.0, signal_counts["protected_authority"] / max(total_entries, 1))
+        + 0.15 * min(1.0, total_path_mentions / max(total_entries, 5)),
+    )
+    continuity_condensation_score = min(
+        1.0,
+        0.1
+        + 0.2 * min(1.0, total_path_mentions / 5)
+        + 0.1 * min(1.0, signal_counts["protected_authority"] / 4)
+        + 0.1 * min(1.0, signal_counts["authority"] / 4)
+        + 0.1 * min(1.0, len(cluster_list) / 4),
+    )
+    backup_summary = _scan_backup_lineage(workspace_root)
+    continuity_reconstruction_confidence = min(
+        1.0,
+        0.15
+        + 0.45 * reconstructed_lineage_density
+        + 0.2 * (1.0 - fragmentation)
+        + 0.1 * backup_summary["backup_lineage_density"],
+    )
+
+    canonical_authority_clusters = [
+        {
+            "cluster": item["cluster"],
+            "count": item["count"],
+            "share": round(item["count"] / max(total_path_mentions, 1), 3),
+        }
+        for item in cluster_list[:6]
+    ]
+
+    return {
+        "reconstructed_lineage_density": round(reconstructed_lineage_density, 3),
+        "canonical_authority_clusters": canonical_authority_clusters,
+        "historical_engineering_gravity": round(historical_engineering_gravity, 3),
+        "continuity_condensation_score": round(continuity_condensation_score, 3),
+        "protected_authority_reinforcement": {
+            "protected_authority_mentions": int(signal_counts["protected_authority"]),
+            "canonical_implementation_mentions": int(signal_counts["canonical_implementation"]),
+            "reconciliation_mentions": int(signal_counts["reconciliation"]),
+            "subsystem_continuity_mentions": int(signal_counts["subsystem_continuity"]),
+        },
+        "lineage_fragmentation_score": round(fragmentation, 3),
+        "continuity_reconstruction_confidence": round(
+            continuity_reconstruction_confidence, 3
+        ),
+        "backup_lineage_summary": backup_summary,
+        "historical_continuity_entry_count": message_count,
+        "historical_file_mention_count": total_path_mentions,
+    }
+
 
 def _build_engineering_continuity_state(workspace_root: Path) -> Dict[str, Any]:
     history_path = workspace_root / ".pecs" / "ai_chat_history.json"
     entries = _normalize_chat_history_entries(_read_json(history_path, []))
+    historical_summary = _build_historical_continuity_summary(entries, workspace_root)
     if not entries:
         return {
             "schema": ENGINEERING_CONTINUITY_SCHEMA,
             "active_engineering_chains": [],
             "updated_at": "",
+            **historical_summary,
         }
 
     class _FallbackArchaeology:
@@ -592,6 +773,7 @@ def _build_engineering_continuity_state(workspace_root: Path) -> Dict[str, Any]:
         "schema": ENGINEERING_CONTINUITY_SCHEMA,
         "active_engineering_chains": chains_list,
         "locality_authority_archaeology": archaeology.to_dict(),
+        **historical_summary,
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -623,6 +805,12 @@ def _build_continuity_hydration_report(
         "chain_count": len(chains),
         "source_counts": source_counts,
         "merged_client_count": len({source for chain in chains if isinstance(chain, dict) for source in (chain.get("source_tags", []) or [])}),
+        "reconstructed_lineage_density": float(continuity_state.get("reconstructed_lineage_density", 0.0) or 0.0),
+        "continuity_reconstruction_confidence": float(continuity_state.get("continuity_reconstruction_confidence", 0.0) or 0.0),
+        "lineage_fragmentation_score": float(continuity_state.get("lineage_fragmentation_score", 0.0) or 0.0),
+        "continuity_condensation_score": float(continuity_state.get("continuity_condensation_score", 0.0) or 0.0),
+        "backup_lineage_summary": continuity_state.get("backup_lineage_summary", {}),
+        "canonical_authority_cluster_count": len(continuity_state.get("canonical_authority_clusters", []) or []),
         "note": "Structured engineering continuity is derived from accepted workspace AI interaction signals only.",
     }
 
@@ -755,6 +943,141 @@ def _build_validation_metrics(
     }
 
 
+def _resolve_active_context_files(
+    active_context: Dict[str, Any],
+    locality_file_map: Dict[str, str],
+) -> List[str]:
+    files: List[str] = []
+    for object_id in active_context.get("activated_objects", [])[:80]:
+        object_key = str(object_id).strip()
+        if not object_key:
+            continue
+        file_path = locality_file_map.get(object_key, "")
+        if not file_path and object_key.startswith("PECS_ID:"):
+            token = object_key[len("PECS_ID:") :]
+            synthetic = token.replace(".", "/")
+            if not synthetic.endswith(".py"):
+                synthetic = f"{synthetic}.py"
+            file_path = synthetic
+        if file_path and file_path not in files:
+            files.append(file_path)
+    return files
+
+
+def _build_divergence_evidence(
+    active_context: Dict[str, Any],
+    compact_bundle: Dict[str, Any],
+    hotspots: List[Dict[str, Any]],
+    runtime_touched_files: List[Dict[str, Any]],
+    runtime_validation: Dict[str, Any],
+    recent_edit_clusters: List[Dict[str, Any]],
+    locality_file_map: Dict[str, str],
+    engineering_continuity_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    active_files = set(
+        _resolve_active_context_files(active_context, locality_file_map)
+    )
+    touched_files = {
+        str(item.get("file", "")).strip()
+        for item in runtime_touched_files
+        if isinstance(item, dict)
+    }
+    touched_files = {path for path in touched_files if path}
+    runtime_files = active_files.union(touched_files)
+
+    chains = (
+        engineering_continuity_state.get("active_engineering_chains", [])
+        if isinstance(engineering_continuity_state, dict)
+        else []
+    )
+
+    historical_files: Dict[str, float] = {}
+    for chain in chains:
+        if not isinstance(chain, dict):
+            continue
+        locality = str(chain.get("accepted_locality", "")).strip()
+        if not locality or locality.startswith(".pecs/"):
+            continue
+        confidence = float(chain.get("continuity_confidence", 0.0) or 0.0)
+        if locality not in historical_files:
+            historical_files[locality] = confidence
+        else:
+            historical_files[locality] = max(historical_files[locality], confidence)
+
+    historical_set = set(historical_files.keys())
+    union_files = runtime_files.union(historical_set)
+    overlap = runtime_files.intersection(historical_set)
+    runtime_historical_match = _safe_ratio(len(overlap), len(union_files))
+
+    hotspot_total = sum(int(item.get("score", 0) or 0) for item in hotspots)
+    hotspot_peak = int(hotspots[0].get("score", 0) or 0) if hotspots else 0
+    continuity_concentration = _safe_ratio(hotspot_peak, max(hotspot_total, 1))
+
+    cluster_count = len(recent_edit_clusters)
+    runtime_file_count = len(runtime_files)
+    scattering_index = _safe_ratio(cluster_count, max(runtime_file_count, 1))
+
+    wrapper_tokens = ("wrapper", "adapter", "bridge", "cli", "launcher")
+    wrapper_runtime_count = len(
+        [
+            path
+            for path in runtime_files
+            if any(token in path.lower() for token in wrapper_tokens)
+        ]
+    )
+    wrapper_inflation = _safe_ratio(wrapper_runtime_count, max(runtime_file_count, 1))
+
+    runtime_confirmation_density = float(
+        runtime_validation.get("runtime_confirmation_density", 0.0) or 0.0
+    )
+    topology_authority_divergence = round(
+        max(0.0, min(1.0, ((1.0 - runtime_confirmation_density) * 0.55) + ((1.0 - runtime_historical_match) * 0.45))),
+        3,
+    )
+
+    convergence_opportunities: List[Dict[str, Any]] = []
+    for locality, confidence in sorted(
+        historical_files.items(), key=lambda item: (-item[1], item[0])
+    ):
+        if locality in runtime_files:
+            continue
+        if confidence < 0.68:
+            continue
+        convergence_opportunities.append(
+            {
+                "historical_locality": locality,
+                "continuity_confidence": round(confidence, 3),
+                "runtime_traversal_present": False,
+                "advisory": "historical_concentration_without_runtime_traversal",
+            }
+        )
+        if len(convergence_opportunities) >= 8:
+            break
+
+    divergence_indicators = {
+        "scattering_index": scattering_index,
+        "continuity_concentration": continuity_concentration,
+        "topology_authority_divergence": topology_authority_divergence,
+        "wrapper_inflation": wrapper_inflation,
+        "runtime_historical_match": runtime_historical_match,
+        "runtime_historical_mismatch": round(max(0.0, 1.0 - runtime_historical_match), 3),
+        "runtime_file_count": runtime_file_count,
+        "historical_file_count": len(historical_set),
+        "overlap_file_count": len(overlap),
+    }
+
+    return {
+        "divergence_indicators": divergence_indicators,
+        "convergence_opportunities": convergence_opportunities,
+        "consumption_boundary_status": {
+            "guidance_mode": "evidence_advisory_only",
+            "hard_enforcement": False,
+            "runtime_confirmation_density": runtime_confirmation_density,
+            "runtime_historical_match": runtime_historical_match,
+        },
+    }
+
+
 def _build_workspace_trajectory(
     active_topology_zone: str,
     recent_edit_clusters: List[Dict[str, Any]],
@@ -880,6 +1203,19 @@ def export_workspace_continuity(workspace_root: Path) -> Dict[str, Any]:
         runtime_events,
         compact_bundle if isinstance(compact_bundle, dict) else {},
     )
+
+    engineering_continuity_state = _build_engineering_continuity_state(workspace_root)
+    divergence_evidence = _build_divergence_evidence(
+        active_context if isinstance(active_context, dict) else {},
+        compact_bundle if isinstance(compact_bundle, dict) else {},
+        hotspots,
+        runtime_touched_files,
+        runtime_validation,
+        recent_edit_clusters,
+        locality_file_map,
+        engineering_continuity_state,
+    )
+
     validation_metrics = _build_validation_metrics(
         recent_edit_clusters,
         repeated_modifications,
@@ -919,6 +1255,15 @@ def export_workspace_continuity(workspace_root: Path) -> Dict[str, Any]:
             "continuity_hotspots": hotspots,
             "runtime_validation": runtime_validation,
             "validation_metrics": validation_metrics,
+            "divergence_indicators": divergence_evidence.get("divergence_indicators", {}),
+            "convergence_opportunities": divergence_evidence.get("convergence_opportunities", []),
+            "consumption_boundary_status": divergence_evidence.get("consumption_boundary_status", {}),
+            "continuity_reconstruction_confidence": float(
+                engineering_continuity_state.get("continuity_reconstruction_confidence", 0.0) or 0.0
+            ),
+            "canonical_authority_clusters": (
+                engineering_continuity_state.get("canonical_authority_clusters", []) or []
+            )[:4],
         }
     )
 
@@ -932,6 +1277,15 @@ def export_workspace_continuity(workspace_root: Path) -> Dict[str, Any]:
             "ownership_hotspots": ownership_density[:12],
             "continuity_hotspots": hotspots[:10],
             "validation_metrics": validation_metrics,
+            "divergence_indicators": divergence_evidence.get("divergence_indicators", {}),
+            "convergence_opportunities": divergence_evidence.get("convergence_opportunities", []),
+            "consumption_boundary_status": divergence_evidence.get("consumption_boundary_status", {}),
+            "continuity_condensation_score": float(
+                engineering_continuity_state.get("continuity_condensation_score", 0.0) or 0.0
+            ),
+            "canonical_authority_clusters": (
+                engineering_continuity_state.get("canonical_authority_clusters", []) or []
+            )[:6],
         }
     )
 
@@ -949,6 +1303,22 @@ def export_workspace_continuity(workspace_root: Path) -> Dict[str, Any]:
         )
     if not hotspots:
         unresolved_tensions.append("continuity hotspots unresolved")
+    if float(
+        divergence_evidence.get("divergence_indicators", {}).get(
+            "runtime_historical_mismatch", 0.0
+        )
+        or 0.0
+    ) >= 0.6:
+        unresolved_tensions.append(
+            "runtime-vs-historical locality mismatch elevated"
+        )
+    if float(
+        divergence_evidence.get("divergence_indicators", {}).get(
+            "wrapper_inflation", 0.0
+        )
+        or 0.0
+    ) >= 0.5:
+        unresolved_tensions.append("wrapper/adapter traversal inflation elevated")
 
     _write_json(continuity_dir / "active_topology.json", active_topology_payload)
     _write_json(continuity_dir / "locality_state.json", locality_state_payload)
@@ -992,9 +1362,32 @@ def export_workspace_continuity(workspace_root: Path) -> Dict[str, Any]:
                 f"- {item['id']} (score={item['score']}, signals={','.join(item['signals'])})"
             )
 
+    divergence_indicators = divergence_evidence.get("divergence_indicators", {})
+    if divergence_indicators:
+        focus_lines.extend(["", "## Divergence Indicators"])
+        focus_lines.append(
+            f"- Scattering index: {divergence_indicators.get('scattering_index', 0.0)}"
+        )
+        focus_lines.append(
+            f"- Runtime historical mismatch: {divergence_indicators.get('runtime_historical_mismatch', 0.0)}"
+        )
+        focus_lines.append(
+            f"- Wrapper inflation: {divergence_indicators.get('wrapper_inflation', 0.0)}"
+        )
+        focus_lines.append(
+            f"- Topology authority divergence: {divergence_indicators.get('topology_authority_divergence', 0.0)}"
+        )
+
+    convergence_opportunities = divergence_evidence.get("convergence_opportunities", [])
+    if convergence_opportunities:
+        focus_lines.extend(["", "## Convergence Opportunities (Advisory)"])
+        for item in convergence_opportunities[:6]:
+            focus_lines.append(
+                f"- {item.get('historical_locality', '')} (continuity_confidence={item.get('continuity_confidence', 0.0)})"
+            )
+
     _write_markdown(continuity_dir / "current_workspace_focus.md", focus_lines)
 
-    engineering_continuity_state = _build_engineering_continuity_state(workspace_root)
     hydration_report = _build_continuity_hydration_report(
         workspace_root, engineering_continuity_state
     )

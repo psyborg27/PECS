@@ -132,6 +132,9 @@ class WorkspaceAssetsManager:
             ".continue/config.yaml",
             ".vscode/tasks.json",
             ".vscode/settings.json",
+            ".pecs/PECS_CONSUMER_PROTOCOL.md",
+            ".kimi/instructions.md",
+            ".commandcode/instructions.md",
         ]
 
         for file_path in files_to_backup:
@@ -207,36 +210,39 @@ class WorkspaceAssetsManager:
 
         elif strategy == "append" or strategy == "append_or_merge":
             if target.exists() and target.suffix == ".md":
-                # Append for markdown
                 source_content = source.read_text(encoding="utf-8")
-                target_content = target.read_text(encoding="utf-8")
-                if source_content not in target_content:
-                    target.write_text(
-                        target_content + "\n\n" + source_content, encoding="utf-8"
+                try:
+                    target_content = target.read_text(encoding="utf-8")
+                except Exception:
+                    # Unable to safely read existing markdown; preserve original and provide manual merge guidance.
+                    manual_merge = self.workspace_root / "PECS_COPILOT_APPEND.md"
+                    manual_merge.write_text(source_content, encoding="utf-8")
+                    logger.warning(
+                        f"Unable to merge markdown asset {asset_id}; created manual merge file {manual_merge}"
                     )
+                    return
+
+                if source_content.strip() in target_content:
+                    return
+
+                marker = f"<!-- ASSET:{asset_id} -->"
+                if marker in target_content:
+                    return
+
+                target.write_text(
+                    target_content + "\n\n" + marker + "\n" + source_content,
+                    encoding="utf-8",
+                )
             else:
                 shutil.copy2(source, target)
 
         elif strategy == "merge_yaml":
             if target.exists() and upgrade:
-                try:
-                    source_data = json.loads(
-                        source.read_text(encoding="utf-8")
-                        .replace(".yaml", ".json")
-                        .replace("YAML", "JSON")
-                    )
-                except json.JSONDecodeError:
-                    logger.warning(
-                        f"Unable to parse YAML merge source for asset {asset_id}; preserving existing target"
-                    )
-                    return
-
-                try:
-                    target_data = json.loads(target.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    target_data = {}
-                self._deep_merge(target_data, source_data)
-                target.write_text(json.dumps(target_data, indent=2), encoding="utf-8")
+                # Preserve existing YAML content when a parseable merge is unavailable.
+                logger.info(
+                    f"YAML merge strategy is not supported in this environment for asset {asset_id}; preserving existing target"
+                )
+                return
             else:
                 shutil.copy2(source, target)
 

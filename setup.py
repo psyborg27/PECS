@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="pecs_pro",
-    version="0.1.0",
+    version="1.0.0-alpha1",
     description="PECS-PRO workspace continuity cache and daemon",
     packages=find_packages(where="."),
     py_modules=[

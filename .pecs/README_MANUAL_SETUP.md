@@ -114,6 +114,48 @@ If you want to install from a local source checkout only for the PECS package, u
 python -m pip install -e /path/to/PECS
 ```
 
+## PECS Preserve-First Operational Lifecycle
+
+PECS now distinguishes between bootstrap, refresh/rebind, and rebuild operations.
+
+- **Bootstrap / install** is used when `.pecs` does not exist in the workspace.
+  It installs managed assets, creates workspace launchers, and writes continuity-aware configuration.
+- **Refresh / rebind** is used when `.pecs` already exists and PECS or runtime logic evolves.
+  It preserves current continuity state and history while updating managed assets, runtime bindings, and derived continuity artifacts.
+- **Rebuild / continuity regeneration** is used when derived topology/continuity artifacts need to be regenerated with current algorithms.
+  It preserves historical continuity, chat history, and telemetry history without destructive resets.
+- **Reset** remains an explicit manual action only, not a default flow.
+
+Use preserve-first flows whenever workspace continuity must survive upgrade and evolution.
+
+### Recommended non-destructive commands
+
+```bash
+pecs install-workspace-assets "/path/to/your/workspace" --preserve
+pecs refresh-workspace-bindings "/path/to/your/workspace" --preserve
+pecs rebuild-continuity "/path/to/your/workspace"
+pecs rebuild-topology "/path/to/your/workspace"
+pecs restart-daemon "/path/to/your/workspace"
+```
+
+### Required PECS task lifecycle
+
+1. Query PECS first using canonical observe-projection commands.
+2. Perform engineering reasoning and bounded edits on runtime workspace modules.
+3. Refresh and rebuild PECS artifacts using lifecycle commands.
+4. Never hand-edit `.pecs` artifacts or continuity outputs.
+
+### When to use each command
+
+- `install-workspace-assets` / `bootstrap-workspace` / `setup-workspace`
+  for initial workspace installation or managed asset refresh.
+- `refresh-workspace-bindings` / `rebind-workspace` / `safe-migration`
+  when the install root moved or PECS bindings changed.
+- `rebuild-continuity` / `rebuild-topology`
+  when continuity or topology artifacts must be regenerated from the same workspace state.
+- `restart-daemon`
+  when the daemon needs a clean runtime restart after configuration or asset refresh.
+
 ## Rebinding a Workspace After Relocation
 
 If PECS moves to a new install root, rerun the package bootstrap and then refresh workspace bindings:
@@ -197,6 +239,51 @@ After stabilization, no-op cycles are intentionally mostly silent
 Users normally do not run bridge scripts directly.
 Use standard refresh flow (`pecs-pro refresh` or `PECS: Refresh Continuity State`).
 The bridge remains lightweight, deterministic, and non-semantic.
+
+## Non-destructive refresh behavior
+
+When reinstalling or rebinding into an already active workspace:
+
+- Existing `.pecs` continuity state is preserved.
+- Existing `.pecs/ai_chat_history.json` is preserved.
+- Existing runtime telemetry/history is preserved.
+- Continue and Copilot assets are merged/appended when possible.
+- Managed launcher/bridge/tool updates are backup-aware before replacement.
+
+Use upgrade-preserving flows for active workspaces:
+
+```bash
+pecs install-workspace-assets "/path/to/workspace" --upgrade
+pecs rebind-workspace "/path/to/workspace" --upgrade
+```
+
+## Optional emitted-envelope observation mode
+
+These commands are visibility-only and do not alter continuity topology/state. They are the canonical PECS-LITE query entrypoints and should be run before broad workspace inspection.
+
+```bash
+pecs observe-projection-snapshot "/path/to/workspace" \
+	--query "runtime locality reconciliation" \
+	--query-source "copilot" \
+	--model-name "unknown" \
+	--profile-class frontier \
+	--local-vs-frontier frontier
+
+pecs observe-projection-daemon "/path/to/workspace" \
+	--query "runtime locality reconciliation" \
+	--query-source "copilot" \
+	--model-name "unknown" \
+	--profile-class frontier \
+	--local-vs-frontier frontier \
+	--iterations 20 \
+	--interval-seconds 2.0
+```
+
+Observation logs are written to:
+
+- `.pecs/logs/observation/projection_snapshot.jsonl`
+- `.pecs/logs/observation/emitted_envelope.jsonl`
+- `.pecs/logs/lifecycle_commands.jsonl`
 
 ## New AI session handoff
 

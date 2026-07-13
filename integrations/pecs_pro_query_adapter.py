@@ -5,8 +5,9 @@ import re
 import ast
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import time
+from runtime.runtime_telemetry import emit_runtime_event
 
 
 class PECSProQueryAdapter:
@@ -54,6 +55,26 @@ class PECSProQueryAdapter:
                 "active_engineering_chains": [],
                 "updated_at": "",
             },
+        )
+        emit_runtime_event(
+            subsystem="ARTIFACT_LOADING",
+            event="continuity_artifacts_loaded",
+            payload={
+                "workspace_root": str(self.workspace_root),
+                "artifact_count": len(
+                    [
+                        self.active_context,
+                        self.compact_bundle,
+                        self.locality_index,
+                        self.topology_compact,
+                        self.locality_state,
+                        self.active_topology,
+                        self.engineering_continuity,
+                    ]
+                ),
+                "retrieval_ready": self._runtime_observability_available(),
+            },
+            workspace_root=self.workspace_root,
         )
 
     def _runtime_observability_available(self) -> bool:
@@ -270,6 +291,93 @@ class PECSProQueryAdapter:
 
         return [file_path] if file_path else []
 
+    def _runtime_interaction_adjacency(self) -> Dict[str, List[str]]:
+        file_map = self._build_file_map()
+        adjacency: Dict[str, List[str]] = {}
+        runtime_edge_types = {
+            "signal_slot",
+            "shortcut_register",
+            "shortcut_ownership",
+            "qaction_register",
+            "qaction_factory_register",
+            "qaction_ownership",
+            "dialog_launch",
+        }
+
+        for edge in self.topology_compact.get("edges", []) if isinstance(self.topology_compact, dict) else []:
+            if not isinstance(edge, dict):
+                continue
+            edge_type = str(edge.get("type", ""))
+            if edge_type not in runtime_edge_types:
+                continue
+
+            src = str(edge.get("from", "") or "")
+            dst = str(edge.get("to", "") or "")
+            src_file = file_map.get(src, "")
+            dst_file = file_map.get(dst, "")
+            if not src_file or not dst_file:
+                continue
+            if src_file.startswith(".pecs") or dst_file.startswith(".pecs"):
+                continue
+
+            adjacency.setdefault(src_file, []).append(dst_file)
+            adjacency.setdefault(dst_file, []).append(src_file)
+
+        # Normalize adjacency deterministically
+        for path, neighbors in adjacency.items():
+            adjacency[path] = sorted(set(neighbors))
+
+        return adjacency
+
+    def runtime_interaction_neighborhood_lookup(
+        self,
+        max_neighbors: int = 12,
+    ) -> List[str]:
+        seeds: List[str] = []
+        for obj in (
+            self.active_context.get("activated_objects", [])
+            if isinstance(self.active_context, dict)
+            else []
+        ):
+            file_path = self._build_file_map().get(str(obj))
+            if file_path and file_path not in seeds:
+                seeds.append(file_path)
+
+        for touched in (
+            self.locality_state.get("active_runtime_touched_files", [])
+            if isinstance(self.locality_state, dict)
+            else []
+        ):
+            file_path = self._normalize_path(str(touched.get("file", "") or ""))
+            if file_path and file_path not in seeds:
+                seeds.append(file_path)
+
+        adjacency = self._runtime_interaction_adjacency()
+        neighborhood: List[str] = []
+        visited: Set[str] = set()
+        queue: List[str] = []
+
+        for seed in seeds:
+            if seed and seed not in visited:
+                queue.append(seed)
+                visited.add(seed)
+                neighborhood.append(seed)
+                if len(neighborhood) >= max_neighbors:
+                    return neighborhood[:max_neighbors]
+
+        while queue and len(neighborhood) < max_neighbors:
+            current = queue.pop(0)
+            for neighbor in adjacency.get(current, []):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                neighborhood.append(neighbor)
+                queue.append(neighbor)
+                if len(neighborhood) >= max_neighbors:
+                    break
+
+        return neighborhood[:max_neighbors]
+
     def detect_behavioral_failures(
         self,
         issue_query: str,
@@ -410,13 +518,42 @@ class PECSProQueryAdapter:
 
         This method is query-only and reads PECS-PRO artifacts. It never scans the workspace.
         """
+        interaction_files = self.runtime_interaction_neighborhood_lookup(
+            max_neighbors=max_targets
+        )
+
+        candidates: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for file_path in interaction_files:
+            if not file_path or file_path.startswith(".pecs/"):
+                continue
+            seen.add(file_path)
+            candidates.append(
+                {
+                    "file": file_path,
+                    "evidence": "runtime_interaction",
+                    "base_confidence": 0.88,
+                    "is_active": True,
+                    "tier_scores": {
+                        "tier_1_runtime": 1.0,
+                    },
+                    "evidence_sources": {
+                        "tier_1_runtime": ["runtime_interaction_graph"],
+                    },
+                    "provenance": ["runtime_interaction_graph"],
+                }
+            )
+            if len(candidates) >= max_targets:
+                return candidates
+
         fusion = self.evidence_fusion_lookup(max_files=max_targets * 2)
         ranked_files = fusion.get("ranked_files", [])
 
-        candidates: List[Dict[str, Any]] = []
-        for item in ranked_files[:max_targets]:
+        for item in ranked_files:
             file_path = str(item.get("file", "") or "")
             if not file_path or file_path.startswith(".pecs/"):
+                continue
+            if file_path in seen:
                 continue
             tier_scores = item.get("tier_scores", {})
             candidates.append(
@@ -430,6 +567,8 @@ class PECSProQueryAdapter:
                     "provenance": item.get("provenance", []),
                 }
             )
+            if len(candidates) >= max_targets:
+                break
 
         return candidates
 
@@ -519,6 +658,28 @@ class PECSProQueryAdapter:
         file_set.update(survivability_scores.keys())
         file_set.update(authority_scores.keys())
 
+        canonical_clusters = []
+        cluster_shares: Dict[str, float] = {}
+        if isinstance(self.engineering_continuity, dict):
+            canonical_clusters = self.engineering_continuity.get(
+                "canonical_authority_clusters", []
+            ) or []
+        for item in canonical_clusters:
+            if not isinstance(item, dict):
+                continue
+            path = self._normalize_path(str(item.get("cluster", "") or ""))
+            if not path or path.startswith(".pecs/"):
+                continue
+            share = 0.0
+            try:
+                share = float(item.get("share", 0.0) or 0.0)
+            except Exception:
+                share = 0.0
+            share = max(0.0, min(1.0, share))
+            if share > 0.0:
+                cluster_shares[path] = max(cluster_shares.get(path, 0.0), share)
+                file_set.add(path)
+
         chain_records = self.engineering_continuity.get("active_engineering_chains", []) if isinstance(self.engineering_continuity, dict) else []
         error_object_correlation: Dict[str, float] = {}
         unresolved_penalty: Dict[str, float] = {}
@@ -583,8 +744,37 @@ class PECSProQueryAdapter:
             tier_2_ownership_continuity = 1.0 if ownership_focus and file_path == ownership_focus else 0.0
             tier_2_continuity_hotspot = round(max(accepted_scores.get(file_path, 0.0), authority_scores.get(file_path, 0.0)), 3)
             tier_2_engineering_chain = round(survivability_scores.get(file_path, 0.0), 3)
+            tier_2_cluster_influence = 0.0
+            if file_path in cluster_shares:
+                historical_gravity = min(
+                    1.0,
+                    float(
+                        self.engineering_continuity.get(
+                            "historical_engineering_gravity", 0.0
+                        ) or 0.0
+                    ),
+                )
+                reconstructed_density = min(
+                    1.0,
+                    float(
+                        self.engineering_continuity.get(
+                            "reconstructed_lineage_density", 0.0
+                        ) or 0.0
+                    ),
+                )
+                share = cluster_shares[file_path]
+                tier_2_cluster_influence = round(
+                    min(0.24, share * (0.12 + 0.44 * historical_gravity) + 0.08 * reconstructed_density),
+                    3,
+                )
             tier_2_continuity = round(
-                (tier_2_ownership_continuity + tier_2_continuity_hotspot + tier_2_engineering_chain) / 3.0,
+                (
+                    tier_2_ownership_continuity
+                    + tier_2_continuity_hotspot
+                    + tier_2_engineering_chain
+                    + tier_2_cluster_influence
+                )
+                / 4.0,
                 3,
             )
 
@@ -623,6 +813,7 @@ class PECSProQueryAdapter:
                     "ownership_continuity" if tier_2_ownership_continuity > 0 else "",
                     "continuity_hotspots" if tier_2_continuity_hotspot > 0 else "",
                     "engineering_continuity_chain" if tier_2_engineering_chain > 0 else "",
+                    "canonical_authority_cluster" if tier_2_cluster_influence > 0 else "",
                 ],
                 "tier_3_validation": [
                     "user_confirmed_runtime_validation" if tier_3_user_confirmed > 0 else "",
@@ -672,6 +863,125 @@ class PECSProQueryAdapter:
             "deterministic": True,
             "weights": weights,
             "ranked_files": ranked_files[:max_files],
+        }
+
+    def _authority_confidence_band(self, score: float) -> str:
+        if score >= 0.80:
+            return "high"
+        if score >= 0.55:
+            return "medium"
+        if score > 0.0:
+            return "low"
+        return "unknown"
+
+    def _authority_source_list(self, tier_sources: Dict[str, Any]) -> List[str]:
+        sources: List[str] = []
+        if not isinstance(tier_sources, dict):
+            return sources
+        for value in tier_sources.values():
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        sources.append(item.strip())
+        return sorted(set(sources))
+
+    def authority_contract_lookup(
+        self,
+        max_targets: int = 128,
+        issue_query: str = "",
+    ) -> Dict[str, Any]:
+        """Build a canonical authority contract from PECS evidence."""
+        evidence_fusion = self.evidence_fusion_lookup(max_files=max_targets * 2)
+        engineering_lookup = self.engineering_continuity_lookup(
+            issue_query=issue_query, max_chains=16
+        )
+
+        consulted_artifacts = [
+            ".pecs/active_context.json",
+            ".pecs/compact_bundle.json",
+            ".pecs/locality_index.json",
+            ".pecs/topology_compact.json",
+            ".pecs/continuity/locality_state.json",
+            ".pecs/continuity/active_topology.json",
+            ".pecs/continuity/engineering_continuity_state.json",
+        ]
+
+        canonical_clusters = (
+            self.engineering_continuity.get("canonical_authority_clusters", [])
+            if isinstance(self.engineering_continuity, dict)
+            else []
+        )
+        canonical_cluster_map: Dict[str, float] = {}
+        for item in canonical_clusters:
+            if not isinstance(item, dict):
+                continue
+            path = self._normalize_path(str(item.get("cluster", "") or ""))
+            if not path:
+                continue
+            try:
+                share = float(item.get("share", 0.0) or 0.0)
+            except Exception:
+                share = 0.0
+            cluster_share = max(0.0, min(1.0, share))
+            if cluster_share > 0.0:
+                canonical_cluster_map[path] = cluster_share
+
+        authority_targets: List[Dict[str, Any]] = []
+        for item in (evidence_fusion.get("ranked_files", []) or [])[:max_targets]:
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("file", "") or "")
+            if not file_path or file_path.startswith(".pecs/"):
+                continue
+
+            tier_scores = item.get("tier_scores", {}) if isinstance(item.get("tier_scores", {}), dict) else {}
+            fused_score = float(item.get("fused_score", 0.0) or 0.0)
+            tier_sources = item.get("tier_sources", {}) if isinstance(item.get("tier_sources", {}), dict) else {}
+            provenance = item.get("provenance", []) if isinstance(item.get("provenance", []), list) else []
+            cluster_bonus = canonical_cluster_map.get(file_path, 0.0)
+
+            authority_targets.append(
+                {
+                    "file": file_path,
+                    "authority_score": fused_score,
+                    "confidence_band": self._authority_confidence_band(fused_score),
+                    "authority_breakdown": {
+                        "tier_0_static": round(float(tier_scores.get("tier_0_static", 0.0) or 0.0), 3),
+                        "tier_1_runtime": round(float(tier_scores.get("tier_1_runtime", 0.0) or 0.0), 3),
+                        "tier_2_continuity": round(float(tier_scores.get("tier_2_continuity", 0.0) or 0.0), 3),
+                        "tier_3_validation": round(float(tier_scores.get("tier_3_validation", 0.0) or 0.0), 3),
+                        "canonical_cluster_bonus": round(cluster_bonus, 3),
+                    },
+                    "evidence_breakdown": {
+                        "contributing_artifacts": self._authority_source_list(tier_sources),
+                        "provenance": sorted(set(provenance)),
+                    },
+                    "tier_sources": tier_sources,
+                }
+            )
+
+        influenced = []
+        for target in authority_targets[: max(8, len(authority_targets))]:
+            evidence_sources = target.get("evidence_breakdown", {}).get("provenance", [])
+            if isinstance(evidence_sources, list):
+                influenced.extend([str(item) for item in evidence_sources if str(item).strip()])
+        influential_artifacts = sorted(set(influenced))
+
+        return {
+            "schema": "pecs.authority_contract.v1",
+            "deterministic": True,
+            "authority_targets": authority_targets,
+            "consulted_artifacts": consulted_artifacts,
+            "authority_inputs": {
+                "evidence_tiers": evidence_fusion.get("weights", {}),
+                "canonical_authority_clusters": canonical_clusters,
+                "accepted_locality_scores": engineering_lookup.get("accepted_locality_scores", {}),
+                "rejected_locality_scores": engineering_lookup.get("rejected_locality_scores", {}),
+                "runtime_confirmed_locality_scores": engineering_lookup.get("runtime_confirmed_locality_scores", {}),
+                "continuity_survivability_scores": engineering_lookup.get("continuity_survivability_scores", {}),
+                "locality_authority_scores": engineering_lookup.get("locality_authority_scores", {}),
+            },
+            "influential_artifacts": influential_artifacts,
         }
 
     def runtime_target_lookup(

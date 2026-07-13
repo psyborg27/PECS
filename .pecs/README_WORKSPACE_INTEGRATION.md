@@ -10,8 +10,14 @@ Runtime workspace modules are the authoritative implementation.
 Installed items:
 - .vscode/tasks.json (PECS tasks, including folder-open auto-start)
 - .vscode/settings.json with pecs.contextPath
+- .continue/config.yaml
+- .continue/rules/pecs-first-routing.yaml
 - .continue/rules/PECS_CONTEXT_RULE.md
 - .continue/rules/PECS_APPEND_RULE.md
+- .continue/rules/CONTINUITY_MAP.md
+- .continue/rules/PECS_CODING_PROTOCOL.md
+- .continue/rules/PECS_PROMPT.md
+- .continue/rules/live-context.md
 - .github/copilot-instructions.md
 - .pecs/tools/append_ai_chat_history.py
 - .pecs/ai_chat_history.json
@@ -49,6 +55,16 @@ Run manually:
 - Task: PECS: Stop Daemon
 - Task: PECS: Refresh Continuity State
 - Task: PECS: Validate Continuity State
+- Task: PECS: Observation Snapshot (Opt-In)
+- Task: PECS: Observation Daemon (Opt-In)
+- Task: PECS: Show Emitted Envelope Log (Opt-In)
+- Task: PECS: Show Projection Snapshot Log (Opt-In)
+
+Refresh behavior:
+- Existing `.pecs` continuity artifacts, chat history, and runtime evidence are preserved.
+- Continue and Copilot assets are merged/appended when possible.
+- Managed launcher/bridge/tool updates are backup-aware before replacement.
+- Runtime workspace modules and topology are not modified by installer flows.
 
 Notes:
 - Auto-start task may require VS Code confirmation for automatic tasks.

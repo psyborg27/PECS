@@ -1,0 +1,39 @@
+name: PECS First Routing
+description: "Prioritize PECS locality projection and runtime targets before broad repository search"
+author: "PECS-PRO"
+
+pecs_enabled: true
+pecs_priority: high
+
+# Rule applies to all Continue requests
+alwaysApply: true
+priority: 100
+
+# PECS artifacts to check
+artifacts:
+  - ".pecs/active_context.json"
+  - ".pecs/locality_index.json"
+  - ".pecs/topology_compact.json"
+  - ".pecs/session_context.json"
+
+# Behavior
+behavior:
+  pre_processing: "Load PECS locality projection"
+  context_narrowing: "Use PECS locality index to filter results"
+  fallback: "Repository search only if PECS insufficient"
+  ignore_patterns:
+    - "**/backup/**"
+    - "**/debug/**"
+    - "**/generated/**"
+    - "**/.venv/**"
+    - "**/node_modules/**"
+
+# Documentation
+documentation:
+  overview: "This rule ensures Continue uses PECS locality projection to narrow the search to runtime workspace targets first."
+  principle: "Filesystem hierarchy is NOT the authority. Runtime workspace modules are authoritative. PECS artifacts are continuity infrastructure only."
+  protocol_reference: ".pecs/PECS_CONSUMER_PROTOCOL.md"
+  precedence:
+    - "Runtime workspace targets"
+    - "Execution locality"
+    - "Filesystem search"

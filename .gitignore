@@ -1,31 +1,103 @@
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+
 .venv/
+venv/
+env/
+
 __pycache__/
-*.pyc
+**/__pycache__/
+*.py[cod]
 *.pyo
 *.pyd
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
 *.egg-info/
-.pecs_workspaces.json
+.eggs/
+
 dist/
 build/
-.venv/
-__pycache__/
-*.pyc
-*.egg-info/
+pip-wheel-metadata/
+
+.coverage
+.coverage.*
+htmlcov/
+
+# -----------------------------------------------------------------------------
+# macOS
+# -----------------------------------------------------------------------------
+
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# -----------------------------------------------------------------------------
+# IDE (machine specific)
+# -----------------------------------------------------------------------------
+
+.vscode/
+.idea/
+
+# -----------------------------------------------------------------------------
+# PECS Generated Runtime State
+# -----------------------------------------------------------------------------
+
+.pecs/logs/
+.pecs/backups/
+.pecs/cache/
 
 .pecs/continuity/
 .pecs/runtime/
 .pecs/runtime_topology_snapshots/
-.pecs/daemon*
+
+.pecs/chat_history_state.json
+.pecs/ai_chat_history.json
+.pecs/continuity_refresh_state.json
+.pecs/config/install_root.json
+
 .pecs/active_context.json
 .pecs/session_context.json
 .pecs/compact_bundle.json
 .pecs/locality_index.json
 .pecs/topology_compact.json
-.continue/
-.github/
-.vscode/
-.pecs/ai_chat_history.json
-.pecs/backups/
-*.egg-info/
+
+.pecs/workspace_registry.json
+.pecs/workspace_registry_validation.json
+
+.pecs/daemon*
+*.pid
+*.lock
+
+# -----------------------------------------------------------------------------
+# Generated outputs
+# -----------------------------------------------------------------------------
+
+telemetry/
+query_outputs_live/
+
+temporary_file_for_sync_plan.txt
+
 .pecs_workspaces.json
+
+# -----------------------------------------------------------------------------
+# Temporary files
+# -----------------------------------------------------------------------------
+
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+.commandcode/taste/
 .DS_Store

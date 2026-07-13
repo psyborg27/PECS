@@ -3,9 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from ..topology.retrieval.topology_retriever import (
-    TopologyRetriever,
-)
+from topology.retrieval.topology_retriever import TopologyRetriever
 
 
 @dataclass

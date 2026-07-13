@@ -30,8 +30,13 @@ behavior:
 
 # Documentation
 documentation:
-  overview: "This rule ensures Continue uses PECS locality projection to narrow the search to runtime workspace targets first."
+  overview: "This rule ensures Continue uses PECS locality projection to narrow the search via the canonical PECS-LITE query command before broad repository search."
   principle: "Filesystem hierarchy is NOT the authority. Runtime workspace modules are authoritative. PECS artifacts are continuity infrastructure only."
+  protocol_reference: ".pecs/PECS_CONSUMER_PROTOCOL.md"
+  workflow:
+    - "Query PECS first using canonical observe-projection commands."
+    - "Use PECS locality projection before broad repository search."
+    - "Refresh PECS through canonical lifecycle commands after edits."
   precedence:
     - "Runtime workspace targets"
     - "Execution locality"

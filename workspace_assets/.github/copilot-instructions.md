@@ -29,6 +29,10 @@ Before suggesting or applying edits, inspect these files when present:
 - Prefer runtime workspace files for actual code edits
 - Avoid patching or editing `.pecs` files
 
+### Shared Consumer Protocol
+
+Refer to the shared canonical protocol at `.pecs/PECS_CONSUMER_PROTOCOL.md` for the authoritative consumer workflow used by Copilot, Continue, Kimi, and Command Code.
+
 ### 3. Context Narrowing
 
 - Narrow scope with PECS locality data
@@ -53,6 +57,22 @@ python3 .pecs/tools/append_ai_chat_history.py "${workspaceFolder}" \
   --source copilot \
   --message "Summary of changes"
 ```
+
+## Canonical PECS Consumer Protocol
+
+For the shared consumer workflow used by Copilot, Continue, Kimi, and Command Code, refer to the canonical protocol document installed at `.pecs/PECS_CONSUMER_PROTOCOL.md`.
+
+This shared protocol defines:
+- canonical PECS query construction
+- querying PECS before broad workspace search
+- reporting the exact PECS query and response
+- indicating whether the response was used
+- recording ignored responses and reasons
+- reporting modified files, classes, and methods/functions
+- completion status
+- avoiding unnecessary search after authoritative PECS ownership
+
+Do not duplicate the consumer protocol text in multiple files. Use the canonical document as the authoritative reference.
 
 ## Chat Continuity
 

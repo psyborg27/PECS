@@ -41,6 +41,8 @@ DEFAULT_RETRIEVAL_PRIORITY = [
     "modes",
 ]
 
+MANAGED_TOOL_SCHEMA = "pecs.managed.asset.v1"
+
 
 def _get_central_python(repo_root: Path) -> str:
     venv_python = repo_root / ".venv" / "bin" / "python"
@@ -300,9 +302,12 @@ def _discover_install_runtime_info(repo_root: Path) -> Dict[str, Any]:
 def _write_workspace_install_root(workspace_root: Path, repo_root: Path) -> None:
     config_path = _workspace_install_root_config_path(workspace_root)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        json.dumps(_discover_install_runtime_info(repo_root), indent=2, sort_keys=True),
-        encoding="utf-8",
+    payload = json.dumps(_discover_install_runtime_info(repo_root), indent=2, sort_keys=True)
+    _write_managed_text_asset(
+        workspace_root,
+        config_path,
+        payload,
+        backup_suffix="pecs-config-backup",
     )
 
 
@@ -378,6 +383,12 @@ def _sanitize_vscode_task_command(command: str) -> str:
         .replace("${{workspaceFolder}}", "${workspaceFolder}")
         .replace("${{input:pecsChatSource}}", "${input:pecsChatSource}")
         .replace("${{input:pecsChatMessage}}", "${input:pecsChatMessage}")
+        .replace("${{input:pecsObservationQuery}}", "${input:pecsObservationQuery}")
+        .replace("${{input:pecsObservationModelName}}", "${input:pecsObservationModelName}")
+        .replace("${{input:pecsObservationProfileClass}}", "${input:pecsObservationProfileClass}")
+        .replace("${{input:pecsObservationLocalVsFrontier}}", "${input:pecsObservationLocalVsFrontier}")
+        .replace("${{input:pecsObservationIterations}}", "${input:pecsObservationIterations}")
+        .replace("${{input:pecsObservationIntervalSeconds}}", "${input:pecsObservationIntervalSeconds}")
     )
 
 
@@ -511,6 +522,89 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
         },
     }
 
+    observation_snapshot_task = {
+        "label": "PECS: Observation Snapshot (Opt-In)",
+        "type": "shell",
+        "command": (
+            'bash -lc \'cd "${workspaceFolder}" '
+            '&& bash .pecs/run_pecs.sh observe-projection-snapshot "${workspaceFolder}" '
+            '--query "${input:pecsObservationQuery}" '
+            '--query-source "${input:pecsChatSource}" '
+            '--model-name "${input:pecsObservationModelName}" '
+            '--profile-class "${input:pecsObservationProfileClass}" '
+            '--local-vs-frontier "${input:pecsObservationLocalVsFrontier}"\''
+        ),
+        "windows": {
+            "command": (
+                'cd "${workspaceFolder}" && .\\pecs\\run_pecs.cmd observe-projection-snapshot "${workspaceFolder}" --query "${input:pecsObservationQuery}" --query-source "${input:pecsChatSource}" --model-name "${input:pecsObservationModelName}" --profile-class "${input:pecsObservationProfileClass}" --local-vs-frontier "${input:pecsObservationLocalVsFrontier}"'
+            )
+        },
+    }
+
+    observation_daemon_task = {
+        "label": "PECS: Observation Daemon (Opt-In)",
+        "type": "shell",
+        "command": (
+            'bash -lc \'cd "${workspaceFolder}" '
+            '&& bash .pecs/run_pecs.sh observe-projection-daemon "${workspaceFolder}" '
+            '--query "${input:pecsObservationQuery}" '
+            '--query-source "${input:pecsChatSource}" '
+            '--model-name "${input:pecsObservationModelName}" '
+            '--profile-class "${input:pecsObservationProfileClass}" '
+            '--local-vs-frontier "${input:pecsObservationLocalVsFrontier}" '
+            '--iterations "${input:pecsObservationIterations}" '
+            '--interval-seconds "${input:pecsObservationIntervalSeconds}"\''
+        ),
+        "windows": {
+            "command": (
+                'cd "${workspaceFolder}" && .\\pecs\\run_pecs.cmd observe-projection-daemon "${workspaceFolder}" --query "${input:pecsObservationQuery}" --query-source "${input:pecsChatSource}" --model-name "${input:pecsObservationModelName}" --profile-class "${input:pecsObservationProfileClass}" --local-vs-frontier "${input:pecsObservationLocalVsFrontier}" --iterations "${input:pecsObservationIterations}" --interval-seconds "${input:pecsObservationIntervalSeconds}"'
+            )
+        },
+        "isBackground": True,
+    }
+
+    stop_observation_daemon_task = {
+        "label": "PECS: Stop Observation Daemon (Opt-In)",
+        "type": "shell",
+        "command": (
+            'bash -lc \'cd "${workspaceFolder}" '
+            '&& ps -eo pid,args | grep "[o]bserve-projection-daemon" | grep "${workspaceFolder}" | awk "{print $1}" | xargs -r kill || echo "No observation daemon process found."\''
+        ),
+        "windows": {
+            "command": (
+                'cd "${workspaceFolder}" && powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match \'observe-projection-daemon\' -and $_.CommandLine -match [regex]::Escape(\'${workspaceFolder}\') } | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue } ; if (-not $?) { Write-Output \'No observation daemon process found.\' }"'
+            )
+        },
+    }
+
+    emitted_envelope_log_task = {
+        "label": "PECS: Show Emitted Envelope Log (Opt-In)",
+        "type": "shell",
+        "command": (
+            'bash -lc \'cd "${workspaceFolder}" '
+            '&& if [[ -f .pecs/logs/observation/emitted_envelope.jsonl ]]; then tail -n 120 .pecs/logs/observation/emitted_envelope.jsonl; else echo "No emitted envelope log found."; fi\''
+        ),
+        "windows": {
+            "command": (
+                'cd "${workspaceFolder}" && powershell.exe -NoProfile -Command "if (Test-Path \'.pecs/logs/observation/emitted_envelope.jsonl\') { Get-Content \'.pecs/logs/observation/emitted_envelope.jsonl\' -Tail 120 } else { Write-Output \'No emitted envelope log found.\' }"'
+            )
+        },
+    }
+
+    projection_snapshot_log_task = {
+        "label": "PECS: Show Projection Snapshot Log (Opt-In)",
+        "type": "shell",
+        "command": (
+            'bash -lc \'cd "${workspaceFolder}" '
+            '&& if [[ -f .pecs/logs/observation/projection_snapshot.jsonl ]]; then tail -n 120 .pecs/logs/observation/projection_snapshot.jsonl; else echo "No projection snapshot log found."; fi\''
+        ),
+        "windows": {
+            "command": (
+                'cd "${workspaceFolder}" && powershell.exe -NoProfile -Command "if (Test-Path \'.pecs/logs/observation/projection_snapshot.jsonl\') { Get-Content \'.pecs/logs/observation/projection_snapshot.jsonl\' -Tail 120 } else { Write-Output \'No projection snapshot log found.\' }"'
+            )
+        },
+    }
+
     desired_tasks = [
         start_task,
         auto_start_task,
@@ -519,6 +613,11 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
         manual_update_task,
         refresh_continuity_task,
         validate_continuity_task,
+        observation_snapshot_task,
+        observation_daemon_task,
+        stop_observation_daemon_task,
+        emitted_envelope_log_task,
+        projection_snapshot_log_task,
     ]
 
     existing_by_label = {
@@ -543,6 +642,42 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
             "type": "promptString",
             "description": "Message/event text",
             "default": "manual append",
+        },
+        {
+            "id": "pecsObservationQuery",
+            "type": "promptString",
+            "description": "Observation query text",
+            "default": "runtime locality reconciliation",
+        },
+        {
+            "id": "pecsObservationModelName",
+            "type": "promptString",
+            "description": "Model identity for diagnostics (e.g. actual model name or unknown)",
+            "default": "unknown",
+        },
+        {
+            "id": "pecsObservationProfileClass",
+            "type": "promptString",
+            "description": "Profile class for the model: local, frontier, or unknown",
+            "default": "unknown",
+        },
+        {
+            "id": "pecsObservationLocalVsFrontier",
+            "type": "promptString",
+            "description": "Runtime target class: local, frontier, or unknown",
+            "default": "unknown",
+        },
+        {
+            "id": "pecsObservationIterations",
+            "type": "promptString",
+            "description": "Bounded observation iterations",
+            "default": "20",
+        },
+        {
+            "id": "pecsObservationIntervalSeconds",
+            "type": "promptString",
+            "description": "Seconds between observation snapshots",
+            "default": "2.0",
         },
     ]
 
@@ -583,6 +718,30 @@ def _backup_target_file(workspace_root: Path, target: Path, suffix: str = "pecs-
     backup_path = backup_dir / backup_name
     shutil.copy2(target, backup_path)
     return backup_path
+
+
+def _write_managed_text_asset(
+    workspace_root: Path,
+    target: Path,
+    content: str,
+    *,
+    backup_suffix: str = "pecs-managed-backup",
+    only_if_missing: bool = False,
+) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_text(content, encoding="utf-8")
+        return
+
+    if only_if_missing:
+        return
+
+    existing = target.read_text(encoding="utf-8")
+    if existing == content:
+        return
+
+    _backup_target_file(workspace_root, target, suffix=backup_suffix)
+    target.write_text(content, encoding="utf-8")
 
 
 def _copy_canonical_asset(source: Path, target: Path, workspace_root: Path) -> None:
@@ -630,8 +789,10 @@ def _write_continue_config(workspace_root: Path, repo_root: Path) -> None:
             config_target.write_text(merged, encoding="utf-8")
         return
 
+    # Preserve pre-existing user YAML and append a managed PECS block instead of replacing it.
+    merged = existing_config.rstrip() + "\n\n" + canonical_config.strip() + "\n"
     _backup_target_file(workspace_root, config_target, suffix="pecs-config-backup")
-    config_target.write_text(canonical_config, encoding="utf-8")
+    config_target.write_text(merged, encoding="utf-8")
 
 
 def _write_continue_rule_inventory(workspace_root: Path, rules_dir: Path, canonical_names: set[str]) -> None:
@@ -721,19 +882,27 @@ def _install_chat_tools(workspace_root: Path, repo_root: Path) -> None:
 
     source_script = repo_root / "append_ai_chat_history.py"
     target_script = tools_dir / "append_ai_chat_history.py"
-    target_script.write_text(
-        source_script.read_text(encoding="utf-8"), encoding="utf-8"
+    _write_managed_text_asset(
+        workspace_root,
+        target_script,
+        source_script.read_text(encoding="utf-8"),
+        backup_suffix="pecs-tool-backup",
     )
 
     manual_source_script = repo_root / "update_ai_chat_history.sh"
     manual_target_script = tools_dir / "update_ai_chat_history.sh"
     if manual_source_script.exists():
-        manual_target_script.write_text(
-            manual_source_script.read_text(encoding="utf-8"), encoding="utf-8"
+        _write_managed_text_asset(
+            workspace_root,
+            manual_target_script,
+            manual_source_script.read_text(encoding="utf-8"),
+            backup_suffix="pecs-tool-backup",
         )
 
     append_cmd = tools_dir / "append_ai_chat_history.cmd"
-    append_cmd.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        append_cmd,
         """@echo off
 setlocal enabledelayedexpansion
 set SCRIPT_DIR=%~dp0
@@ -747,11 +916,13 @@ set PYTHON_EXEC=python
 where python >nul 2>&1 || set PYTHON_EXEC=py -3
 "%PYTHON_EXEC%" "%SCRIPT_DIR%append_ai_chat_history.py" "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!"
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-tool-backup",
     )
 
     append_ps1 = tools_dir / "append_ai_chat_history.ps1"
-    append_ps1.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        append_ps1,
         """$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $WorkspaceRoot = if ($args.Count -ge 1) { $args[0] } else { "." }
 $RemainingArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
@@ -760,11 +931,13 @@ if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $python) { Write-Error "Python is not available on PATH"; exit 1 }
 & $python.Source (Join-Path $ScriptDir "append_ai_chat_history.py") $WorkspaceRoot @RemainingArgs
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-tool-backup",
     )
 
     update_cmd = tools_dir / "update_ai_chat_history.cmd"
-    update_cmd.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        update_cmd,
         """@echo off
 setlocal enabledelayedexpansion
 set SCRIPT_DIR=%~dp0
@@ -778,11 +951,13 @@ set PYTHON_EXEC=python
 where python >nul 2>&1 || set PYTHON_EXEC=py -3
 "%PYTHON_EXEC%" "%SCRIPT_DIR%append_ai_chat_history.py" "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!"
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-tool-backup",
     )
 
     update_ps1 = tools_dir / "update_ai_chat_history.ps1"
-    update_ps1.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        update_ps1,
         """$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $WorkspaceRoot = if ($args.Count -ge 1) { $args[0] } else { "." }
 $RemainingArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
@@ -791,7 +966,7 @@ if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $python) { Write-Error "Python is not available on PATH"; exit 1 }
 & $python.Source (Join-Path $ScriptDir "append_ai_chat_history.py") $WorkspaceRoot @RemainingArgs
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-tool-backup",
     )
 
     chat_history = workspace_root / ".pecs" / "ai_chat_history.json"
@@ -810,18 +985,27 @@ def _install_bridge_runtime(workspace_root: Path, repo_root: Path) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     continuity_dir.mkdir(parents=True, exist_ok=True)
 
-    (runtime_dir / ".gitkeep").write_text("", encoding="utf-8")
+    _write_managed_text_asset(
+        workspace_root,
+        runtime_dir / ".gitkeep",
+        "",
+        backup_suffix="pecs-runtime-backup",
+    )
 
     export_source = repo_root / "scripts" / "export_workspace_continuity.py"
     validate_source = repo_root / "scripts" / "validate_workspace_continuity.py"
 
-    (bridge_dir / "export_workspace_continuity.py").write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        bridge_dir / "export_workspace_continuity.py",
         export_source.read_text(encoding="utf-8"),
-        encoding="utf-8",
+        backup_suffix="pecs-bridge-backup",
     )
-    (bridge_dir / "validate_workspace_continuity.py").write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        bridge_dir / "validate_workspace_continuity.py",
         validate_source.read_text(encoding="utf-8"),
-        encoding="utf-8",
+        backup_suffix="pecs-bridge-backup",
     )
 
     bridge_runner = """from __future__ import annotations
@@ -882,7 +1066,12 @@ def main() -> None:
 if __name__ == \"__main__\":
     main()
 """
-    (bridge_dir / "run_bridge.py").write_text(bridge_runner, encoding="utf-8")
+    _write_managed_text_asset(
+        workspace_root,
+        bridge_dir / "run_bridge.py",
+        bridge_runner,
+        backup_suffix="pecs-bridge-backup",
+    )
 
     bridge_sh = """#!/usr/bin/env bash
 set -euo pipefail
@@ -942,9 +1131,16 @@ if ! command -v "$PYTHON_CMD" >/dev/null 2>&1; then
 fi
 "$PYTHON_CMD" .pecs/bridge/run_bridge.py "$COMMAND" --workspace "$WORKSPACE_ROOT"
 """
-    (bridge_dir / "run_bridge.sh").write_text(bridge_sh, encoding="utf-8")
+    _write_managed_text_asset(
+        workspace_root,
+        bridge_dir / "run_bridge.sh",
+        bridge_sh,
+        backup_suffix="pecs-bridge-backup",
+    )
     bridge_cmd = bridge_dir / "run_bridge.cmd"
-    bridge_cmd.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        bridge_cmd,
         """@echo off
 setlocal enabledelayedexpansion
 set SCRIPT_DIR=%~dp0
@@ -956,10 +1152,12 @@ set PYTHON_EXEC=python
 where python >nul 2>&1 || set PYTHON_EXEC=py -3
 "%PYTHON_EXEC%" "%SCRIPT_DIR%run_bridge.py" "%COMMAND%" --workspace "%WORKSPACE_ROOT%"
 """,
-        encoding="utf-8",
+        backup_suffix="pecs-bridge-backup",
     )
     bridge_ps1 = bridge_dir / "run_bridge.ps1"
-    bridge_ps1.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        bridge_ps1,
         """$args = $args
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $Command = if ($args.Count -ge 1) { $args[0] } else { "refresh" }
@@ -969,7 +1167,7 @@ if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $python) { Write-Error "Python is not available on PATH"; exit 1 }
 & $python.Source (Join-Path $ScriptDir "run_bridge.py") $Command --workspace $WorkspaceRoot
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-bridge-backup",
     )
 
     bridge_config = {
@@ -979,9 +1177,11 @@ if (-not $python) { Write-Error "Python is not available on PATH"; exit 1 }
         "omit_empty_sections": True,
         "sparse_output": True,
     }
-    (config_dir / "continuity_bridge.json").write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        config_dir / "continuity_bridge.json",
         json.dumps(bridge_config, indent=2, sort_keys=True),
-        encoding="utf-8",
+        backup_suffix="pecs-config-backup",
     )
 
     continuity_scaffold = {
@@ -1094,7 +1294,9 @@ fi
 
 
     run_pecs = launcher_dir / "run_pecs.sh"
-    run_pecs.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        run_pecs,
         common_loader
         + "\n"
         + "if [[ -n \"$PECS_EXE\" && -x \"$PECS_EXE\" ]]; then\n"
@@ -1109,12 +1311,15 @@ fi
         + "echo \"ERROR: Could not resolve PECS runtime from install root or PATH.\" >&2\n"
         + "echo \"Expected install root: $INSTALL_ROOT\" >&2\n"
         + "exit 1\n"
-        , encoding="utf-8"
+        ,
+        backup_suffix="pecs-launcher-backup",
     )
     run_pecs.chmod(0o755)
 
     run_daemon = launcher_dir / "run_pecs_daemon.sh"
-    run_daemon.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        run_daemon,
         common_loader
         + "\n"
         + "WORKSPACE_ROOT=\"${1:-.}\"\n"
@@ -1201,12 +1406,15 @@ fi
         + "  cat \"$HEALTH_FILE\" >&2 || true\n"
         + "fi\n"
         + "exit 1\n"
-        , encoding="utf-8"
+        ,
+        backup_suffix="pecs-launcher-backup",
     )
     run_daemon.chmod(0o755)
 
     run_pecs_cmd = launcher_dir / "run_pecs.cmd"
-    run_pecs_cmd.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        run_pecs_cmd,
         """@echo off
 setlocal enabledelayedexpansion
 set SCRIPT_DIR=%~dp0
@@ -1233,11 +1441,13 @@ if defined INSTALL_PYTHON if exist "%INSTALL_PYTHON%" (
 )
 pecs %*
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-launcher-backup",
     )
 
     run_daemon_cmd = launcher_dir / "run_pecs_daemon.cmd"
-    run_daemon_cmd.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        run_daemon_cmd,
         """@echo off
 setlocal enabledelayedexpansion
 set WORKSPACE_ROOT=%~1
@@ -1251,11 +1461,13 @@ if exist "%LAUNCHER%" (
 echo ERROR: Workspace daemon launcher missing: %LAUNCHER%
 exit /b 1
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-launcher-backup",
     )
 
     run_pecs_ps1 = launcher_dir / "run_pecs.ps1"
-    run_pecs_ps1.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        run_pecs_ps1,
         """$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $InstallRoot = $null
 $InstallPython = $null
@@ -1282,11 +1494,13 @@ Write-Error "ERROR: Could not resolve PECS runtime from install root or PATH."
 Write-Error "Expected install root: $InstallRoot"
 exit 1
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-launcher-backup",
     )
 
     run_daemon_ps1 = launcher_dir / "run_pecs_daemon.ps1"
-    run_daemon_ps1.write_text(
+    _write_managed_text_asset(
+        workspace_root,
+        run_daemon_ps1,
         """param([string]$WorkspaceRoot = ".")
 Set-StrictMode -Version Latest
 
@@ -1392,7 +1606,7 @@ while ((Get-Date) -lt $endTime) {
 Write-Error "Daemon startup timed out waiting for .pecs/daemon.pid. See $LogFile"
 exit 1
 """,
-        encoding="utf-8",
+    backup_suffix="pecs-launcher-backup",
     )
 
 
@@ -1455,15 +1669,52 @@ Run manually:
 - Task: PECS: Stop Daemon
 - Task: PECS: Refresh Continuity State
 - Task: PECS: Validate Continuity State
+- Task: PECS: Observation Snapshot (Opt-In)
+- Task: PECS: Observation Daemon (Opt-In)
+- Task: PECS: Stop Observation Daemon (Opt-In)
+- Task: PECS: Show Emitted Envelope Log (Opt-In)
+- Task: PECS: Show Projection Snapshot Log (Opt-In)
+
+Refresh behavior:
+- Existing `.pecs` continuity artifacts, chat history, and runtime evidence are preserved.
+- Continue and Copilot assets are merged/appended when possible.
+- Managed launcher/bridge/tool updates are backup-aware before replacement.
+- Runtime workspace modules and topology are not modified by installer flows.
 
 Notes:
 - Auto-start task may require VS Code confirmation for automatic tasks.
 - Continue/Copilot integration is configured to use PECS locality projection and runtime targets.
 - PECS-LITE is stateless and query-driven. It does not scan the workspace.
+- The canonical query entrypoint is `pecs observe-projection-snapshot "<workspace>" --query "<query>" --query-source "<source>" --model-name "<model>" --profile-class "<local|frontier|unknown>" --local-vs-frontier "<local|frontier|unknown>"`; use `pecs observe-projection-daemon` for repeated observation.
+- Use preserve-first workspace lifecycle commands for asset refresh and continuity rebuilds.
 """
     # PECS Workspace Integration\n\nThis workspace was configured by PECS workspace installer.\n\nPECS artifacts are generated continuity infrastructure only.\nDo NOT edit or patch .pecs files.\nPECS does not contain engineering sourcecode.\nRuntime workspace modules are the authoritative implementation.\n\nInstalled items:\n- .vscode/tasks.json (PECS tasks, including folder-open auto-start)\n- .vscode/settings.json with pecs.contextPath\n- .continue/rules/PECS_CONTEXT_RULE.md\n- .continue/rules/PECS_APPEND_RULE.md\n- .github/copilot-instructions.md\n- .pecs/tools/append_ai_chat_history.py\n- .pecs/ai_chat_history.json\n- .pecs/bridge/run_bridge.py\n- .pecs/bridge/export_workspace_continuity.py\n- .pecs/bridge/validate_workspace_continuity.py\n- .pecs/config/continuity_bridge.json\n- .pecs/README_MANUAL_SETUP.md\n\nRun manually:\n- Task: PECS: Start Daemon\n- Task: PECS: Stop Daemon\n- Task: PECS: Refresh Continuity State\n- Task: PECS: Validate Continuity State\n\nNotes:\n- Auto-start task may require VS Code confirmation for automatic tasks.\n- Continue/Copilot integration is configured to use PECS locality projection and runtime targets.\n- PECS artifacts are infrastructure only; do not treat them as source.\n"""
     readme.parent.mkdir(parents=True, exist_ok=True)
-    readme.write_text(content, encoding="utf-8")
+    _write_managed_text_asset(
+        workspace_root,
+        readme,
+        content,
+        backup_suffix="pecs-doc-backup",
+    )
+
+
+def _install_consumer_guidance_assets(workspace_root: Path, repo_root: Path) -> None:
+    guidance_assets = [
+        (repo_root / "workspace_assets" / ".pecs" / "PECS_CONSUMER_PROTOCOL.md", workspace_root / ".pecs" / "PECS_CONSUMER_PROTOCOL.md"),
+        (repo_root / "workspace_assets" / ".kimi" / "instructions.md", workspace_root / ".kimi" / "instructions.md"),
+        (repo_root / "workspace_assets" / ".commandcode" / "instructions.md", workspace_root / ".commandcode" / "instructions.md"),
+    ]
+
+    for source, target in guidance_assets:
+        if not source.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_managed_text_asset(
+            workspace_root,
+            target,
+            source.read_text(encoding="utf-8"),
+            backup_suffix="pecs-guidance-backup",
+        )
 
 
 def _copy_manual_setup_guide(workspace_root: Path, repo_root: Path) -> None:
@@ -1471,10 +1722,28 @@ def _copy_manual_setup_guide(workspace_root: Path, repo_root: Path) -> None:
     target = workspace_root / ".pecs" / "README_MANUAL_SETUP.md"
     if source.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        _write_managed_text_asset(
+            workspace_root,
+            target,
+            source.read_text(encoding="utf-8"),
+            backup_suffix="pecs-doc-backup",
+        )
 
 
-def install_workspace(workspace_root: Path, repo_root: Path) -> None:
+def _has_existing_workspace_assets(workspace_root: Path) -> bool:
+    if not (workspace_root / ".pecs").exists():
+        return False
+
+    markers = [
+        workspace_root / ".pecs" / "config" / "install_root.json",
+        workspace_root / ".vscode" / "tasks.json",
+        workspace_root / ".continue" / "config.yaml",
+        workspace_root / ".github" / "copilot-instructions.md",
+    ]
+    return any(path.exists() for path in markers)
+
+
+def install_workspace(workspace_root: Path, repo_root: Path, preserve_existing: bool = True) -> None:
     _ensure_global_runtime_registry(repo_root)
     _install_chat_tools(workspace_root, repo_root)
     _install_bridge_runtime(workspace_root, repo_root)
@@ -1488,6 +1757,7 @@ def install_workspace(workspace_root: Path, repo_root: Path) -> None:
     _write_continue_config(workspace_root, repo_root)
     _write_continue_rules(workspace_root)
     _write_copilot_instructions(workspace_root, repo_root)
+    _install_consumer_guidance_assets(workspace_root, repo_root)
     _copy_manual_setup_guide(workspace_root, repo_root)
     _write_readme(workspace_root)
     _write_workspace_install_root(workspace_root, repo_root)
@@ -1507,8 +1777,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--upgrade",
+        dest="preserve",
         action="store_true",
         help="Preserve existing user configuration during upgrade",
+    )
+    parser.add_argument(
+        "--preserve",
+        dest="preserve",
+        action="store_true",
+        help="Preserve existing user configuration (alias)",
     )
     parser.add_argument(
         "--verify-only",
@@ -1601,7 +1878,10 @@ def main() -> None:
                 sys.exit(0 if result["valid"] else 1)
 
             # Install assets
-            install_result = manager.install_assets(upgrade=args.upgrade, verify=False)
+            existing_assets = _has_existing_workspace_assets(workspace_root)
+            preserve_existing = bool(getattr(args, 'preserve', False) or existing_assets)
+
+            install_result = manager.install_assets(upgrade=preserve_existing, verify=False)
             logger.info(f"Asset installation status: {install_result['status']}")
             logger.info(f"Installed {len(install_result['installed_assets'])} asset(s)")
 
@@ -1615,7 +1895,11 @@ def main() -> None:
 
         # Always run legacy installer as fallback/supplementary
         logger.info("Installing workspace integration (legacy flow)")
-        install_workspace(workspace_root, repo_root)
+        install_workspace(
+            workspace_root,
+            repo_root,
+            preserve_existing=_has_existing_workspace_assets(workspace_root),
+        )
         logger.info("Legacy installation completed")
 
         logger.info(

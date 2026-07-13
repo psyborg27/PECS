@@ -17,6 +17,18 @@ def main() -> None:
         default=".",
         help="Path to the workspace root to monitor (default: current directory).",
     )
+    parser.add_argument(
+        "--dump-workspace-graph",
+        action="store_true",
+        default=False,
+        help="Write workspace_graph.json and workspace_graph_validation.json on each refresh.",
+    )
+    parser.add_argument(
+        "--dump-workspace-registry",
+        action="store_true",
+        default=False,
+        help="Write workspace_registry.json and workspace_registry_validation.json on each refresh.",
+    )
     args = parser.parse_args()
 
     workspace_root = Path(args.workspace_root).resolve()
@@ -27,6 +39,8 @@ def main() -> None:
         workspace_root=workspace_root,
         runtime_session=components["runtime_session"],
         compact_builder=components["compact_builder"],
+        dump_workspace_graph=args.dump_workspace_graph,
+        dump_workspace_registry=args.dump_workspace_registry,
     )
 
     daemon.start()

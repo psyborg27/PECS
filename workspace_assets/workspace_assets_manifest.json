@@ -121,6 +121,33 @@
       "description": "PECS workspace integration README"
     },
     {
+      "id": "pecs_consumer_protocol",
+      "source": ".pecs/PECS_CONSUMER_PROTOCOL.md",
+      "target": ".pecs/PECS_CONSUMER_PROTOCOL.md",
+      "merge_strategy": "create_if_missing",
+      "required": true,
+      "create_dirs": true,
+      "description": "Shared canonical PECS consumer protocol"
+    },
+    {
+      "id": "kimi_instructions",
+      "source": ".kimi/instructions.md",
+      "target": ".kimi/instructions.md",
+      "merge_strategy": "create_if_missing",
+      "required": true,
+      "create_dirs": true,
+      "description": "Minimal Kimi consumer guidance referencing the shared PECS protocol"
+    },
+    {
+      "id": "commandcode_instructions",
+      "source": ".commandcode/instructions.md",
+      "target": ".commandcode/instructions.md",
+      "merge_strategy": "create_if_missing",
+      "required": true,
+      "create_dirs": true,
+      "description": "Minimal Command Code consumer guidance referencing the shared PECS protocol"
+    },
+    {
       "id": "readme_workspace_integration",
       "source": "README_WORKSPACE_INTEGRATION.md",
       "target": ".pecs/README_WORKSPACE_INTEGRATION.md",
@@ -175,9 +202,12 @@
     "required_assets": [
       ".pecs/WORKSPACE_BOOTSTRAP.md",
       ".pecs/README.md",
+      ".pecs/PECS_CONSUMER_PROTOCOL.md",
       ".pecs/tools/append_ai_chat_history.py",
       ".pecs/bridge/run_bridge.py",
       ".github/copilot-instructions.md",
+      ".kimi/instructions.md",
+      ".commandcode/instructions.md",
       ".continue/config.yaml",
       ".continue/rules/pecs-first-routing.yaml",
       ".vscode/tasks.json"

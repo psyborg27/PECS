@@ -6,7 +6,7 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, TypedDict
 
 from export_workspace_continuity import export_workspace_continuity
 
@@ -41,6 +41,54 @@ MAX_FILE_SIZES = {
 }
 
 
+class RuntimePathRecord(TypedDict):
+    path: str
+    changed: bool
+
+
+class RuntimeConfirmationRecord(TypedDict):
+    path: str
+    confirmed: bool
+
+
+class RuntimeValidationRecord(TypedDict):
+    paths: List[RuntimePathRecord]
+    confirmations: List[RuntimeConfirmationRecord]
+    divergence_detected: bool
+
+
+class ActiveTopologyRecord(TypedDict):
+    runtime_validation: RuntimeValidationRecord
+
+
+class LocalityZoneRecord(TypedDict):
+    name: str
+    stale: bool
+
+
+class LocalityAssumptionRecord(TypedDict):
+    description: str
+    valid: bool
+
+
+class LocalityStateRecord(TypedDict):
+    zones: List[LocalityZoneRecord]
+    assumptions: List[LocalityAssumptionRecord]
+
+
+class DriftEvidencePayload(TypedDict):
+    stale_ownership: List[str]
+    runtime_path_changes: List[str]
+    topology_divergence: List[str]
+    missing_runtime_confirmations: List[str]
+    invalid_locality_assumptions: List[str]
+
+
+class GovernanceTransferEnvelope(TypedDict):
+    active_topology: ActiveTopologyRecord
+    locality_state: LocalityStateRecord
+
+
 def _hash_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -55,6 +103,111 @@ def _load_json(path: Path) -> Dict[str, object]:
 def _write_json(path: Path, payload: Dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _normalize_runtime_paths(value: object) -> List[RuntimePathRecord]:
+    if not isinstance(value, list):
+        raise ValueError("runtime_validation.paths must be a list")
+    result: List[RuntimePathRecord] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("runtime_validation.paths entries must be objects")
+        path_value = item.get("path")
+        changed_value = item.get("changed")
+        if not isinstance(path_value, str):
+            raise ValueError("runtime_validation.paths.path must be a string")
+        if not isinstance(changed_value, bool):
+            raise ValueError("runtime_validation.paths.changed must be a bool")
+        result.append({"path": path_value, "changed": changed_value})
+    return sorted(result, key=lambda x: (x["path"], x["changed"]))
+
+
+def _normalize_runtime_confirmations(value: object) -> List[RuntimeConfirmationRecord]:
+    if not isinstance(value, list):
+        raise ValueError("runtime_validation.confirmations must be a list")
+    result: List[RuntimeConfirmationRecord] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("runtime_validation.confirmations entries must be objects")
+        path_value = item.get("path")
+        confirmed_value = item.get("confirmed")
+        if not isinstance(path_value, str):
+            raise ValueError("runtime_validation.confirmations.path must be a string")
+        if not isinstance(confirmed_value, bool):
+            raise ValueError("runtime_validation.confirmations.confirmed must be a bool")
+        result.append({"path": path_value, "confirmed": confirmed_value})
+    return sorted(result, key=lambda x: (x["path"], x["confirmed"]))
+
+
+def _normalize_runtime_validation(value: object) -> RuntimeValidationRecord:
+    if not isinstance(value, dict):
+        raise ValueError("active_topology.runtime_validation must be an object")
+    paths = _normalize_runtime_paths(value.get("paths", []))
+    confirmations = _normalize_runtime_confirmations(value.get("confirmations", []))
+    divergence = value.get("divergence_detected", False)
+    if not isinstance(divergence, bool):
+        raise ValueError("runtime_validation.divergence_detected must be a bool")
+    return {
+        "paths": paths,
+        "confirmations": confirmations,
+        "divergence_detected": divergence,
+    }
+
+
+def _normalize_active_topology(raw: Dict[str, object]) -> ActiveTopologyRecord:
+    return {
+        "runtime_validation": _normalize_runtime_validation(raw.get("runtime_validation", {}))
+    }
+
+
+def _normalize_locality_zones(value: object) -> List[LocalityZoneRecord]:
+    if not isinstance(value, list):
+        raise ValueError("locality_state.zones must be a list")
+    result: List[LocalityZoneRecord] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("locality_state.zones entries must be objects")
+        name_value = item.get("name")
+        stale_value = item.get("stale")
+        if not isinstance(name_value, str):
+            raise ValueError("locality_state.zones.name must be a string")
+        if not isinstance(stale_value, bool):
+            raise ValueError("locality_state.zones.stale must be a bool")
+        result.append({"name": name_value, "stale": stale_value})
+    return sorted(result, key=lambda x: (x["name"], x["stale"]))
+
+
+def _normalize_locality_assumptions(value: object) -> List[LocalityAssumptionRecord]:
+    if not isinstance(value, list):
+        raise ValueError("locality_state.assumptions must be a list")
+    result: List[LocalityAssumptionRecord] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("locality_state.assumptions entries must be objects")
+        description_value = item.get("description")
+        valid_value = item.get("valid")
+        if not isinstance(description_value, str):
+            raise ValueError("locality_state.assumptions.description must be a string")
+        if not isinstance(valid_value, bool):
+            raise ValueError("locality_state.assumptions.valid must be a bool")
+        result.append({"description": description_value, "valid": valid_value})
+    return sorted(result, key=lambda x: (x["description"], x["valid"]))
+
+
+def _normalize_locality_state(raw: Dict[str, object]) -> LocalityStateRecord:
+    return {
+        "zones": _normalize_locality_zones(raw.get("zones", [])),
+        "assumptions": _normalize_locality_assumptions(raw.get("assumptions", [])),
+    }
+
+
+def _parse_governance_transfer_envelope(artifacts_dir: Path) -> GovernanceTransferEnvelope:
+    raw_locality = _load_json(artifacts_dir / "locality_state.json")
+    raw_topology = _load_json(artifacts_dir / "active_topology.json")
+    return {
+        "active_topology": _normalize_active_topology(raw_topology),
+        "locality_state": _normalize_locality_state(raw_locality),
+    }
 
 
 def _build_semantic_delta_fixture(temp_root: Path) -> None:
@@ -207,6 +360,57 @@ def validate_workspace_continuity(workspace_root: Path) -> Dict[str, object]:
         "schema_checks": schema_checks,
         "compact_checks": compact_checks,
     }
+
+
+def detect_workspace_drift(artifacts_dir: Path) -> DriftEvidencePayload:
+    """
+    Detect workspace drift by comparing runtime artifacts.
+
+    Args:
+        artifacts_dir (Path): Directory containing runtime artifacts.
+
+    Returns:
+        Dict[str, Any]: Drift detection results.
+    """
+    drift_report: DriftEvidencePayload = {
+        "stale_ownership": [],
+        "runtime_path_changes": [],
+        "topology_divergence": [],
+        "missing_runtime_confirmations": [],
+        "invalid_locality_assumptions": [],
+    }
+
+    envelope = _parse_governance_transfer_envelope(artifacts_dir)
+    locality_state = envelope["locality_state"]
+    runtime_validation = envelope["active_topology"]["runtime_validation"]
+
+    # Detect stale ownership
+    for zone in locality_state["zones"]:
+        if zone["stale"]:
+            drift_report["stale_ownership"].append(zone["name"])
+
+    # Detect runtime path changes
+    for path_record in runtime_validation["paths"]:
+        if path_record["changed"]:
+            drift_report["runtime_path_changes"].append(path_record["path"])
+
+    if runtime_validation["divergence_detected"]:
+        drift_report["topology_divergence"].append("runtime_topology_divergence_detected")
+
+    # Detect missing runtime confirmations
+    for confirmation in runtime_validation["confirmations"]:
+        if not confirmation["confirmed"]:
+            drift_report["missing_runtime_confirmations"].append(confirmation["path"])
+
+    # Detect invalid locality assumptions
+    for assumption in locality_state["assumptions"]:
+        if not assumption["valid"]:
+            drift_report["invalid_locality_assumptions"].append(assumption["description"])
+
+    for key in drift_report:
+        drift_report[key] = sorted(drift_report[key])
+
+    return drift_report
 
 
 def main() -> None:

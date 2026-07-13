@@ -20,6 +20,17 @@ from topology.incremental.incremental_topology_updater import (
     IncrementalTopologyUpdater,
 )
 
+from execution_graph.graph.workspace_graph import (
+    Graph,
+)
+from workspace_registry.models import (
+    WorkspaceRegistry,
+)
+
+from evidence_correlation.engines.evidence_correlator import (
+    EvidenceCorrelator,
+)
+
 
 @dataclass
 class WorkspaceRuntimeSession:
@@ -79,6 +90,37 @@ class WorkspaceRuntimeSession:
     )
 
     current_focus_object: Optional[str] = None
+
+    workspace_graph: Optional[Graph] = None
+    workspace_registry: Optional[WorkspaceRegistry] = None
+    evidence_correlator: Optional[EvidenceCorrelator] = None
+
+    def set_workspace_graph(
+        self,
+        graph: Graph,
+    ) -> None:
+        self.workspace_graph = graph
+
+    def get_workspace_graph(self) -> Optional[Graph]:
+        return self.workspace_graph
+
+    def set_workspace_registry(
+        self,
+        registry: WorkspaceRegistry,
+    ) -> None:
+        self.workspace_registry = registry
+
+    def get_workspace_registry(self) -> Optional[WorkspaceRegistry]:
+        return self.workspace_registry
+
+    def set_evidence_correlator(
+        self,
+        correlator: EvidenceCorrelator,
+    ) -> None:
+        self.evidence_correlator = correlator
+
+    def get_evidence_correlator(self) -> Optional[EvidenceCorrelator]:
+        return self.evidence_correlator
 
     def activate_object(
         self,

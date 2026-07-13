@@ -132,6 +132,9 @@ class WorkspaceAssetsManager:
             ".continue/config.yaml",
             ".vscode/tasks.json",
             ".vscode/settings.json",
+            ".pecs/PECS_CONSUMER_PROTOCOL.md",
+            ".kimi/instructions.md",
+            ".commandcode/instructions.md",
         ]
 
         for file_path in files_to_backup:

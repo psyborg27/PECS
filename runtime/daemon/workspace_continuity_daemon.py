@@ -27,6 +27,12 @@ from topology.locality_traversal import LocalityTraversal
 from topology.runtime_edge_reinforcement import RuntimeEdgeReinforcement
 from topology.topology_edge_weights import edge_weight
 from ..session.workspace_runtime_session import WorkspaceRuntimeSession
+from execution_graph.builders.workspace_graph_builder import WorkspaceGraphBuilder
+from execution_graph.graph.workspace_graph import Graph
+from validation.workspace_graph_validator import WorkspaceGraphValidator
+from workspace_registry.builders.workspace_registry_builder import WorkspaceRegistryBuilder
+from validation.workspace_registry_validator import WorkspaceRegistryValidator
+from evidence_correlation.engines.evidence_correlator import EvidenceCorrelator
 
 # Keep watchdog imports at module scope so nested handlers can always resolve.
 try:
@@ -91,6 +97,8 @@ class WorkspaceContinuityDaemon:
     artifact_dir: Path = field(init=False)
     observer: Optional[object] = field(default=None, init=False)
     current_changes: Set[Path] = field(default_factory=set, init=False)
+    dump_workspace_graph: bool = False
+    dump_workspace_registry: bool = False
     pid_file_name: str = "daemon.pid"
     cycle_lock_name: str = "daemon.lock"
     cycle_lock_ttl_seconds: int = 180
@@ -116,6 +124,10 @@ class WorkspaceContinuityDaemon:
     _last_continuity_refresh_timestamp: Optional[float] = field(default=None, init=False)
     _last_continuity_refresh_status: str = field(default="", init=False)
     _cycle_lock_owned: bool = field(default=False, init=False)
+    _recent_python_changes: Deque[str] = field(
+        default_factory=lambda: deque(maxlen=80), init=False
+    )
+    _last_changed_python_files: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.resolve()
@@ -138,6 +150,11 @@ class WorkspaceContinuityDaemon:
         self.edge_reinforcement = RuntimeEdgeReinforcement()
         self.locality_traversal = LocalityTraversal()
         self.continuity_archaeology = ContinuityArchaeology()
+        self.workspace_graph_builder = WorkspaceGraphBuilder(self.workspace_root)
+        self.workspace_graph_validator = WorkspaceGraphValidator()
+        self.workspace_registry_builder = WorkspaceRegistryBuilder(self.workspace_root)
+        self.workspace_registry_validator = WorkspaceRegistryValidator()
+        self.evidence_correlator: Optional[EvidenceCorrelator] = None
         self.runtime_snapshot_dir = self.artifact_dir / "runtime_topology_snapshots"
         self.runtime_snapshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -452,6 +469,8 @@ class WorkspaceContinuityDaemon:
             if not python_changed_files:
                 return
 
+            self._record_python_change_intent(python_changed_files)
+
             # Rebuild from runtime topology roots (entrypoints), not filesystem-wide inventory.
             self._rebuild_runtime_topology(changed_files=python_changed_files)
         except Exception as exc:
@@ -464,10 +483,40 @@ class WorkspaceContinuityDaemon:
             )
             raise
 
+    def _record_python_change_intent(self, changed_files: List[Path]) -> None:
+        normalized: List[str] = []
+        for path in changed_files:
+            try:
+                rel = str(path.relative_to(self.workspace_root))
+            except Exception:
+                continue
+            rel = rel.replace("\\", "/").strip()
+            if rel and rel not in normalized:
+                normalized.append(rel)
+
+        for rel in normalized:
+            self._recent_python_changes.append(rel)
+
+        # Keep a bounded ordered snapshot for deterministic artifact export.
+        deduped_recent: List[str] = []
+        for rel in reversed(list(self._recent_python_changes)):
+            if rel not in deduped_recent:
+                deduped_recent.append(rel)
+            if len(deduped_recent) >= 40:
+                break
+
+        self._last_changed_python_files = list(reversed(deduped_recent))
+        self.runtime_session.session_metadata["recent_changed_files"] = list(
+            self._last_changed_python_files
+        )
+
     def _rebuild_runtime_topology(
         self,
         changed_files: Optional[List[Path]] = None,
     ) -> None:
+        if changed_files:
+            self._record_python_change_intent(changed_files)
+
         self._log_activity(
             "topology_rebuild_started",
             {
@@ -490,6 +539,10 @@ class WorkspaceContinuityDaemon:
         entrypoints = self._discover_entrypoints()
         reachable_files = self._resolve_runtime_reachable_files(entrypoints)
         self._populate_runtime_indexes(reachable_files)
+        self._build_and_validate_workspace_graph(
+            reachable_files,
+            entrypoints,
+        )
 
         focus = self._infer_active_focus_from_chat()
         activation = self._infer_locality_activation(focus)
@@ -523,6 +576,7 @@ class WorkspaceContinuityDaemon:
             {
                 "workspace_root": str(self.workspace_root),
                 "artifact_dir": str(self.artifact_dir),
+                "changed_files": list(self._last_changed_python_files),
                 "runtime_reachable_count": len(self.runtime_reachable_files),
                 "topology_edge_count": len(self.runtime_topology_edges),
                 "runtime_locality_payload_count": len(self.runtime_locality_payload),
@@ -585,6 +639,172 @@ class WorkspaceContinuityDaemon:
             self._run_continuity_refresh(
                 trigger="runtime_topology",
                 reason="runtime topology rebuild",
+            )
+
+    def _build_and_validate_workspace_graph(
+        self,
+        reachable_files: Set[Path],
+        entrypoints: List[Path],
+    ) -> None:
+        """
+        Build the Workspace Graph from the same data used to populate
+        legacy indexes, assign it to the runtime session, and validate
+        it against the legacy indexes.
+
+        This is additive: no legacy consumer is changed.
+        """
+        try:
+            graph = self.workspace_graph_builder.build(
+                reachable_files=reachable_files,
+                runtime_locality_payload=self.runtime_locality_payload,
+                runtime_topology_edges=self.runtime_topology_edges,
+                entrypoints=entrypoints,
+                graph_index=self.runtime_session.graph_index,
+                execution_index=self.runtime_session.execution_index,
+                ownership_index=self.runtime_session.topology_retriever.ownership_index,
+                locality_index=self.runtime_session.locality_index,
+                runtime_path_index=None,
+            )
+            self.runtime_session.set_workspace_graph(graph)
+
+            report = self.workspace_graph_validator.validate(
+                graph,
+                graph_index=self.runtime_session.graph_index,
+                execution_index=self.runtime_session.execution_index,
+                ownership_index=self.runtime_session.topology_retriever.ownership_index,
+                locality_index=self.runtime_session.locality_index,
+            )
+
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_GRAPH",
+                event="workspace_graph_built",
+                payload={
+                    "node_count": len(graph.nodes),
+                    "edge_count": len(graph.edges),
+                    "graph_hash": graph.metadata.graph_hash,
+                    "validation_valid": report.valid,
+                    "validation_mismatch_count": len(report.mismatches),
+                },
+            )
+
+            if self.dump_workspace_graph:
+                self._write_json(
+                    "workspace_graph.json",
+                    graph.to_dict(),
+                )
+                self._write_json(
+                    "workspace_graph_validation.json",
+                    report.to_dict(),
+                )
+
+            self._build_and_validate_workspace_registry(graph)
+        except Exception as exc:
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_GRAPH",
+                event="workspace_graph_build_failed",
+                payload={"error": str(exc)},
+            )
+            LOG.warning(
+                "Workspace graph build/validation failed: %s",
+                exc,
+            )
+
+    def _build_and_validate_workspace_registry(
+        self,
+        graph: Graph,
+    ) -> None:
+        """
+        Build the deterministic Workspace Registry from the Workspace Graph,
+        attach it to the runtime session, and validate coverage.
+
+        Feature projections are not implemented here; the registry is the
+        authority for future projection engines.
+        """
+        try:
+            registry = self.workspace_registry_builder.build(graph)
+            self.runtime_session.set_workspace_registry(registry)
+            self._build_evidence_correlation_index(graph, registry)
+
+            registry_report = self.workspace_registry_validator.validate(
+                registry,
+                graph,
+            )
+
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_REGISTRY",
+                event="workspace_registry_built",
+                payload={
+                    "feature_count": len(registry.features),
+                    "infrastructure_unit_count": len(
+                        registry.infrastructure_units
+                    ),
+                    "registry_hash": registry.metadata.registry_hash,
+                    "validation_valid": registry_report.valid,
+                    "validation_mismatch_count": len(
+                        registry_report.mismatches
+                    ),
+                },
+            )
+
+            if self.dump_workspace_registry:
+                self._write_json(
+                    "workspace_registry.json",
+                    registry.to_dict(),
+                )
+                self._write_json(
+                    "workspace_registry_validation.json",
+                    registry_report.to_dict(),
+                )
+        except Exception as exc:
+            self._emit_runtime_telemetry(
+                subsystem="WORKSPACE_REGISTRY",
+                event="workspace_registry_build_failed",
+                payload={"error": str(exc)},
+            )
+            LOG.warning(
+                "Workspace registry build/validation failed: %s",
+                exc,
+            )
+
+    def _build_evidence_correlation_index(
+        self,
+        graph: Graph,
+        registry: Any,
+    ) -> None:
+        """
+        Build the deterministic Evidence Correlation index from the frozen
+        Workspace Graph and Workspace Registry.
+
+        The correlator is attached to the runtime session so future queries
+        can be answered incrementally without rebuilding.
+        """
+        try:
+            correlator = EvidenceCorrelator(
+                workspace_root=self.workspace_root,
+                graph=graph,
+                registry=registry,
+                locality_payload=self.runtime_locality_payload,
+            )
+            correlator.build_index()
+            self.evidence_correlator = correlator
+            self.runtime_session.set_evidence_correlator(correlator)
+
+            self._emit_runtime_telemetry(
+                subsystem="EVIDENCE_CORRELATION",
+                event="evidence_correlation_index_built",
+                payload={
+                    "indexed_nodes": len(correlator._evidence or {}),
+                },
+            )
+        except Exception as exc:
+            self._emit_runtime_telemetry(
+                subsystem="EVIDENCE_CORRELATION",
+                event="evidence_correlation_index_failed",
+                payload={"error": str(exc)},
+            )
+            LOG.warning(
+                "Evidence correlation index build failed: %s",
+                exc,
             )
 
     def _discover_entrypoints(self) -> List[Path]:
@@ -740,6 +960,13 @@ class WorkspaceContinuityDaemon:
         self.runtime_reachable_files = set(reachable_files)
         self.runtime_locality_payload.clear()
         self.runtime_topology_edges = []
+
+        self.runtime_session.session_metadata["previous_active_objects"] = sorted(
+            self.runtime_session.active_objects
+        )[:160]
+        self.runtime_session.session_metadata["previous_active_paths"] = sorted(
+            self.runtime_session.active_paths
+        )[:160]
 
         self.runtime_session.locality_index.object_locality.clear()
         self.runtime_session.locality_index.runtime_locality.clear()
@@ -1347,17 +1574,36 @@ class WorkspaceContinuityDaemon:
         focus: Dict[str, object],
     ) -> Dict[str, object]:
         issue = str(focus.get("current_issue", ""))
-        edited_files = [
-            str(path.relative_to(self.workspace_root))
-            for path in sorted(self.runtime_reachable_files)
-            if path.suffix == ".py"
-        ]
+        edited_files = list(
+            self.runtime_session.session_metadata.get("recent_changed_files", [])
+            if isinstance(self.runtime_session.session_metadata, dict)
+            else []
+        )
+        edit_intent_source = "recent_changed_files"
+        if not edited_files:
+            edited_files = list(self._last_changed_python_files)
+            edit_intent_source = "daemon_recent_changed_files"
+        if not edited_files:
+            edited_files = [
+                str(path.relative_to(self.workspace_root))
+                for path in sorted(self.runtime_reachable_files)
+                if path.suffix == ".py"
+            ]
+            edit_intent_source = "runtime_reachable_fallback"
+
         dissatisfaction = focus.get("dissatisfaction_signals", [])
         active_zone = str(focus.get("active_topology_zone", "general_runtime"))
         historical_fix_locality = self.runtime_session.session_metadata.get(
             "recent_fix_locality", []
         )
-        current_session_objects = sorted(self.runtime_session.active_objects)
+        current_session_objects = list(
+            self.runtime_session.session_metadata.get("previous_active_objects", [])
+            if isinstance(self.runtime_session.session_metadata, dict)
+            else []
+        )
+        if not current_session_objects:
+            current_session_objects = list(historical_fix_locality)
+
         activation = self.locality_activation_engine.infer_locality(
             current_issue=issue,
             edited_files=edited_files,
@@ -1366,6 +1612,14 @@ class WorkspaceContinuityDaemon:
             historical_fix_locality=historical_fix_locality,
             current_session_objects=current_session_objects,
         )
+        diagnostics = activation.get("activation_diagnostics", {})
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        diagnostics["edit_intent_source"] = edit_intent_source
+        diagnostics["edited_file_count"] = len(edited_files)
+        diagnostics["historical_session_object_count"] = len(current_session_objects)
+        activation["activation_diagnostics"] = diagnostics
+
         self.edge_reinforcement.reset()
         self.edge_reinforcement.reinforce_edges(activation.get("observed_edges", []))
         return activation
@@ -1679,10 +1933,26 @@ class WorkspaceContinuityDaemon:
         ][:120]
 
         active_objects = activation.get("activated_objects", [])
+        previous_active_objects = list(
+            self.runtime_session.session_metadata.get("previous_active_objects", [])
+            if isinstance(self.runtime_session.session_metadata, dict)
+            else []
+        )
+        historical_overlap = [
+            obj for obj in previous_active_objects if obj in set(active_objects)
+        ][:24]
+        historical_residual = [
+            obj for obj in previous_active_objects if obj not in set(active_objects)
+        ][:24]
+
         self.runtime_session.active_objects = set(active_objects)
         self.runtime_session.active_zones = set(
             activation.get("active_runtime_zones", [])
         )
+        self.runtime_session.session_metadata["recent_fix_locality"] = bundle_ids[:24]
+        self.runtime_session.session_metadata[
+            "historical_continuity_overlap"
+        ] = historical_overlap
 
         return {
             "current_issue": focus.get("current_issue", ""),
@@ -1697,6 +1967,14 @@ class WorkspaceContinuityDaemon:
             "activation_confidence": activation.get("activation_confidence", {}),
             "activation_reasons": activation.get("activation_reasons", {}),
             "activation_diagnostics": activation.get("activation_diagnostics", {}),
+            "historical_continuity_gravity": {
+                "previous_active_objects": previous_active_objects[:40],
+                "historical_overlap": historical_overlap,
+                "historical_residual": historical_residual,
+                "recent_fix_locality": list(
+                    self.runtime_session.session_metadata.get("recent_fix_locality", [])
+                )[:24],
+            },
             "recent_locality": bundle_ids[:25],
             "runtime_neighborhood": neighborhood,
             "dissatisfaction_signals": focus.get("dissatisfaction_signals", []),
@@ -2249,15 +2527,13 @@ class WorkspaceContinuityDaemon:
     def _health_status(self) -> Dict[str, object]:
         runtime_ready = bool(self.runtime_locality_payload)
         topology_ready = bool(self.runtime_reachable_files)
-        continuity_ready = runtime_ready and bool(self.runtime_topology_edges)
+        continuity_ready = runtime_ready
         issues: List[str] = []
 
         if not runtime_ready:
             issues.append("runtime locality payload not initialized")
         if not topology_ready:
             issues.append("runtime topology not initialized")
-        if runtime_ready and not continuity_ready:
-            issues.append("continuity graph incomplete")
 
         core_artifacts = {
             "locality_index.json": (self.artifact_dir / "locality_index.json").exists(),

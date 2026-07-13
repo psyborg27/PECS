@@ -16,6 +16,7 @@ It intentionally sacrifices continuity completeness in favor of small-model exec
 
 from __future__ import annotations
 
+import json
 import re
 import os
 from types import MappingProxyType
@@ -25,6 +26,13 @@ from typing import Any, Dict, List, Mapping, Tuple, TypedDict
 
 
 EMPTY_MAPPING: Mapping[str, object] = MappingProxyType({})
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 class ProjectionProfile(Enum):
@@ -104,6 +112,28 @@ class CapabilityClassifier:
         },
     }
 
+    CANONICAL_MAP: Dict[str, str] = {
+        "small": "small_local",
+        "medium": "medium_local",
+        "large": "large_local",
+        "execution": "large_local",
+        "small_local": "small_local",
+        "medium_local": "medium_local",
+        "large_local": "large_local",
+        "frontier_online": "frontier_online",
+        "reasoning_frontier": "reasoning_frontier",
+        "agentic_frontier": "agentic_frontier",
+        "frontier": "frontier_online",
+        "local": "medium_local",
+    }
+
+    @classmethod
+    def _normalize_profile_hint(cls, hint: str) -> str:
+        normalized = str(hint or "").strip().lower()
+        if not normalized:
+            return ""
+        return cls.CANONICAL_MAP.get(normalized, normalized)
+
     @classmethod
     def classify(
         cls,
@@ -111,10 +141,16 @@ class CapabilityClassifier:
         model_source: str,
         context_window: int,
         model_size_hint: str,
+        profile_class_hint: str = "",
+        local_vs_frontier: str = "",
+        reasoning_capability_class: str = "",
     ) -> Dict[str, Any]:
         source = str(model_source or "").lower().strip()
         name = str(model_name or "").lower().strip()
-        hint = str(model_size_hint or "small").lower().strip()
+        hint = cls._normalize_profile_hint(model_size_hint or "small")
+        profile_class_hint = cls._normalize_profile_hint(profile_class_hint)
+        local_hint = cls._normalize_profile_hint(local_vs_frontier)
+        reasoning_hint = str(reasoning_capability_class or "").strip().lower()
         window = int(context_window or 0)
 
         detection_method: List[str] = []
@@ -127,14 +163,16 @@ class CapabilityClassifier:
         profile = "small_local"
         confidence = 0.63
 
-        if hint == "large":
-            profile = "large_local"
-            confidence = 0.72
-        elif hint == "medium":
-            profile = "medium_local"
-            confidence = 0.70
-
-        if window >= 250000 and source in {"ollama", "local"}:
+        if profile_class_hint in cls.CANONICAL_MAP:
+            profile = cls._normalize_profile_hint(profile_class_hint)
+            confidence = 0.79 if profile_class_hint in {"large", "execution"} else 0.71
+        elif hint in cls.CANONICAL_MAP:
+            profile = hint
+            confidence = 0.72 if hint == "large_local" else 0.70 if hint == "medium_local" else 0.63
+        elif reasoning_hint.startswith("very_high"):
+            profile = "reasoning_frontier"
+            confidence = 0.78
+        elif window >= 250000 and source in {"ollama", "local"}:
             profile = "small_local"
             confidence = max(confidence, 0.73)
         elif window >= 120000 and source in {"openai", "anthropic", "azure", "cloud"}:
@@ -156,6 +194,9 @@ class CapabilityClassifier:
                 "context_window": window,
                 "detection_confidence": round(confidence, 2),
                 "detection_method": detection_method,
+                "profile_class_hint": profile_class_hint,
+                "local_vs_frontier": local_hint,
+                "reasoning_capability_class": reasoning_hint,
             },
         }
 
@@ -430,6 +471,7 @@ class ProjectionHardener:
         issue_query: str = "",
         runtime_zone_count: int = 1,
         engineering_continuity: Mapping[str, object] = EMPTY_MAPPING,
+        authority_contract: Mapping[str, object] = EMPTY_MAPPING,
     ) -> Tuple[List[str], List[str], ProjectionMetrics]:
         """
         Harden a projection for small models.
@@ -440,18 +482,27 @@ class ProjectionHardener:
 
         limits = self.LIMITS[profile]
 
+        scored_targets: List[ConfidenceScore] = []
+        authority_contract_dict = authority_contract if isinstance(authority_contract, dict) else {}
+        authority_targets = authority_contract_dict.get("authority_targets", [])
         continuity_signals = dict(engineering_continuity)
-        continuity_anchor_candidates = self._continuity_anchor_candidates(
-            continuity_signals
-        )
-        scoring_input = list(raw_targets) + continuity_anchor_candidates
-
-        # Score all targets
-        scored_targets = self._score_candidates(
-            scoring_input,
-            issue_query=issue_query,
-            continuity_signals=continuity_signals,
-        )
+        if isinstance(authority_targets, list) and authority_targets:
+            raw_target_order = self._build_raw_target_order(raw_targets)
+            scored_targets = self._score_from_authority_contract(
+                authority_targets=authority_targets,
+                raw_target_order=raw_target_order,
+            )
+            scoring_input = raw_targets
+        else:
+            continuity_anchor_candidates = self._continuity_anchor_candidates(
+                continuity_signals
+            )
+            scoring_input = list(raw_targets) + continuity_anchor_candidates
+            scored_targets = self._score_candidates(
+                scoring_input,
+                issue_query=issue_query,
+                continuity_signals=continuity_signals,
+            )
 
         # Sort by confidence (descending)
         sorted_targets = sorted(
@@ -681,6 +732,53 @@ class ProjectionHardener:
                 }
             )
         return candidates[:8]
+
+    def _build_raw_target_order(self, raw_targets: List[Any]) -> Dict[str, int]:
+        """Preserve original raw target order for tie-breaking."""
+        order: Dict[str, int] = {}
+        for index, target in enumerate(raw_targets):
+            if isinstance(target, dict):
+                file_path = str(target.get("file", "") or "")
+            else:
+                file_path = str(target or "")
+            normalized = file_path.strip()
+            if normalized and normalized not in order:
+                order[normalized] = index
+        return order
+
+    def _score_from_authority_contract(
+        self,
+        authority_targets: List[Any],
+        raw_target_order: Dict[str, int],
+    ) -> List[ConfidenceScore]:
+        """Score candidates using the Authority Engine contract."""
+        scored: List[ConfidenceScore] = []
+        for index, item in enumerate(authority_targets):
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("file", "") or "").strip()
+            if not file_path:
+                continue
+
+            authority_score = float(item.get("authority_score", 0.0) or 0.0)
+            breakdown = item.get("authority_breakdown", {}) if isinstance(item.get("authority_breakdown", {}), dict) else {}
+            evidence_breakdown = item.get("evidence_breakdown", {}) if isinstance(item.get("evidence_breakdown", {}), dict) else {}
+            provenance = evidence_breakdown.get("provenance", []) if isinstance(evidence_breakdown.get("provenance", []), list) else []
+
+            evidence_strength = int(min(5, max(1, round(authority_score * 5))))
+            locality_proximity = min(3, raw_target_order.get(file_path, index) // 4)
+            confidence = max(0.0, min(1.0, authority_score))
+
+            scored.append(
+                ConfidenceScore(
+                    file_path=file_path,
+                    confidence=confidence,
+                    evidence_type="authority_contract",
+                    evidence_strength=evidence_strength,
+                    locality_proximity=locality_proximity,
+                )
+            )
+        return scored
 
     def _capture_confidence_summary(
         self,
@@ -967,6 +1065,11 @@ class ProjectionExporter:
         capability_bundle: Mapping[str, object] = EMPTY_MAPPING,
         behavioral_signals: Mapping[str, object] = EMPTY_MAPPING,
         runtime_context: Mapping[str, object] = EMPTY_MAPPING,
+        authority_contract: Mapping[str, object] = EMPTY_MAPPING,
+        consumer_decision: Mapping[str, object] = EMPTY_MAPPING,
+        query_source: str = "unknown",
+        model_name: str = "",
+        model_source: str = "",
     ) -> Dict[str, Any]:
         """Export projection with profile-specific enrichment."""
 
@@ -1024,6 +1127,7 @@ class ProjectionExporter:
                 authority_confidence=authority_confidence,
             )
 
+        authority_contract_dict = authority_contract if isinstance(authority_contract, dict) else {}
         projection = {
             "schema": "pecs_lite.runtime_projection.locality_authority.v3",
             "disclaimer": cls.DISCLAIMER,
@@ -1053,7 +1157,36 @@ class ProjectionExporter:
             "pecs_lite_status": pecs_lite_status,
             "runtime_context": runtime_context_dict,
             "evidence_fusion": evidence_fusion,
+            "authority_breakdown": authority_contract_dict.get("authority_targets", []),
+            "authority_inputs": authority_contract_dict.get("authority_inputs", {}),
+            "consulted_artifacts": authority_contract_dict.get("consulted_artifacts", []),
+            "influential_artifacts": authority_contract_dict.get("influential_artifacts", []),
         }
+
+        continuity_summary = {
+            "reconstructed_lineage_density": _safe_float(
+                engineering_continuity_dict.get("reconstructed_lineage_density", 0.0)
+            ),
+            "continuity_reconstruction_confidence": _safe_float(
+                engineering_continuity_dict.get("continuity_reconstruction_confidence", 0.0)
+            ),
+            "historical_engineering_gravity": _safe_float(
+                engineering_continuity_dict.get("historical_engineering_gravity", 0.0)
+            ),
+            "continuity_condensation_score": _safe_float(
+                engineering_continuity_dict.get("continuity_condensation_score", 0.0)
+            ),
+            "lineage_fragmentation_score": _safe_float(
+                engineering_continuity_dict.get("lineage_fragmentation_score", 0.0)
+            ),
+            "protected_authority_reinforcement": engineering_continuity_dict.get(
+                "protected_authority_reinforcement", {}
+            ),
+            "canonical_authority_clusters": engineering_continuity_dict.get(
+                "canonical_authority_clusters", []
+            ) or [],
+        }
+        projection["engineering_continuity_summary"] = continuity_summary
 
         if behavioral_signals_dict:
             projection["behavioral_signals"] = behavioral_signals_dict
@@ -1085,6 +1218,23 @@ class ProjectionExporter:
             evidence_fusion=evidence_fusion,
         )
 
+        (
+            projection["emitted_advisory_cognition"],
+            projection["discarded_cognition_summary"],
+            projection["shaping_losses"],
+            projection["final_emission_observability"],
+        ) = cls._build_final_cognition_envelope(
+            projection=projection,
+            metrics=metrics,
+            active_zone=active_zone,
+            query_source=query_source,
+            model_name=model_name,
+            model_source=model_source,
+            issue_query=issue_query,
+            runtime_context=runtime_context_dict,
+            adapter=adapter,
+        )
+
         return projection
 
     @classmethod
@@ -1112,6 +1262,27 @@ class ProjectionExporter:
             if isinstance(item, dict)
         }
 
+        canonical_cluster_map = {
+            str(item.get("cluster", "") or ""): min(
+                1.0,
+                float(item.get("share", 0.0) or 0.0),
+            )
+            for item in (engineering_continuity.get("canonical_authority_clusters", []) or [])
+            if isinstance(item, dict) and str(item.get("cluster", "") or "").strip()
+        }
+        historical_gravity = min(
+            1.0,
+            float(engineering_continuity.get("historical_engineering_gravity", 0.0) or 0.0),
+        )
+        reconstructed_density = min(
+            1.0,
+            float(engineering_continuity.get("reconstructed_lineage_density", 0.0) or 0.0),
+        )
+        continuity_condensation_score = min(
+            1.0,
+            float(engineering_continuity.get("continuity_condensation_score", 0.0) or 0.0),
+        )
+
         chains = engineering_continuity.get("active_engineering_chains", []) or []
         expected_outcome = (
             str(chains[0].get("issue", "")) if chains else str(issue_query or "")
@@ -1137,8 +1308,28 @@ class ProjectionExporter:
             tier_scores = evidence_entry.get("tier_scores", {}) if isinstance(evidence_entry.get("tier_scores", {}), dict) else {}
             fusion_sources = evidence_entry.get("provenance", []) if isinstance(evidence_entry.get("provenance", []), list) else []
 
+            cluster_share = canonical_cluster_map.get(file_path, 0.0)
+            continuity_emergence_bonus = 0.0
+            if cluster_share > 0.0:
+                continuity_emergence_bonus = round(
+                    min(
+                        0.08,
+                        cluster_share * (0.06 + 0.50 * historical_gravity)
+                        + 0.04 * reconstructed_density,
+                    ),
+                    3,
+                )
+                if continuity_emergence_bonus > 0.0:
+                    fusion_sources = sorted(set(fusion_sources + ["canonical_authority_cluster"]))
+
+            adjusted_confidence = min(1.0, fused_score + continuity_emergence_bonus)
+            continuity_emergence_contribution = round(
+                min(1.0, continuity_emergence_bonus + 0.15 * historical_gravity),
+                3,
+            )
+
             search_expansion_allowed = bool(
-                fused_score >= 0.45
+                adjusted_confidence >= 0.45
                 and float(tier_scores.get("tier_1_runtime", 0.0) or 0.0) >= 0.25
                 and float(tier_scores.get("tier_2_continuity", 0.0) or 0.0) >= 0.20
             )
@@ -1153,7 +1344,7 @@ class ProjectionExporter:
                 "probable_file": file_path,
                 "probable_class": symbol_info.get("probable_class", ""),
                 "probable_method": symbol_info.get("probable_method", ""),
-                "confidence": round(max(0.0, min(1.0, fused_score)), 3),
+                "confidence": round(max(0.0, min(1.0, adjusted_confidence)), 3),
                 "authority_type": authority_type,
                 "evidence_tiers": {
                     "tier_0_static": round(float(tier_scores.get("tier_0_static", 0.0) or 0.0), 3),
@@ -1162,6 +1353,13 @@ class ProjectionExporter:
                     "tier_3_validation": round(float(tier_scores.get("tier_3_validation", 0.0) or 0.0), 3),
                 },
                 "evidence_sources": sorted(fusion_sources),
+                "continuity_authority_share": round(cluster_share, 3),
+                "historical_authority_emergence_weight": round(
+                    min(1.0, historical_gravity * 0.3 + continuity_emergence_contribution * 0.4),
+                    3,
+                ),
+                "continuity_emergence_contribution": continuity_emergence_contribution,
+                "continuity_condensation_score": continuity_condensation_score,
                 "supporting_symbols": supporting_symbols,
                 "related_files": related,
                 "entrypoint_chain": chain,
@@ -1184,6 +1382,26 @@ class ProjectionExporter:
             if any(item.get("probable_file") == file_path for item in targets):
                 continue
             symbol_info = adapter.resolve_symbol_authority(file_path=file_path, issue_query=issue_query)
+            secondary_confidence = round(float(hardener.last_confidence_by_path.get(file_path, {}).get("confidence", 0.45) or 0.45), 3)
+            cluster_share = canonical_cluster_map.get(file_path, 0.0)
+            continuity_emergence_bonus = 0.0
+            if cluster_share > 0.0:
+                continuity_emergence_bonus = round(
+                    min(
+                        0.06,
+                        cluster_share * (0.05 + 0.45 * historical_gravity)
+                        + 0.03 * reconstructed_density,
+                    ),
+                    3,
+                )
+            adjusted_secondary_confidence = round(
+                min(1.0, secondary_confidence + continuity_emergence_bonus),
+                3,
+            )
+            target_confidence = adjusted_secondary_confidence
+            sources = sorted((evidence_by_file.get(file_path, {}).get("provenance", []) or []))
+            if cluster_share > 0.0:
+                sources = sorted(set(sources + ["canonical_authority_cluster"]))
             targets.append(
                 {
                     "task_hint": str(issue_query or "inferred_issue").strip() or "inferred_issue",
@@ -1191,7 +1409,7 @@ class ProjectionExporter:
                     "probable_file": file_path,
                     "probable_class": symbol_info.get("probable_class", ""),
                     "probable_method": symbol_info.get("probable_method", ""),
-                    "confidence": round(float(hardener.last_confidence_by_path.get(file_path, {}).get("confidence", 0.45) or 0.45), 3),
+                    "confidence": target_confidence,
                     "authority_type": "secondary",
                     "evidence_tiers": {
                         "tier_0_static": round(float((evidence_by_file.get(file_path, {}).get("tier_scores", {}) or {}).get("tier_0_static", 0.0) or 0.0), 3),
@@ -1199,7 +1417,7 @@ class ProjectionExporter:
                         "tier_2_continuity": round(float((evidence_by_file.get(file_path, {}).get("tier_scores", {}) or {}).get("tier_2_continuity", 0.0) or 0.0), 3),
                         "tier_3_validation": round(float((evidence_by_file.get(file_path, {}).get("tier_scores", {}) or {}).get("tier_3_validation", 0.0) or 0.0), 3),
                     },
-                    "evidence_sources": sorted((evidence_by_file.get(file_path, {}).get("provenance", []) or [])),
+                    "evidence_sources": sources,
                     "supporting_symbols": list(symbol_info.get("supporting_symbols", []))[: max_symbol_expansions],
                     "related_files": adapter.related_files_for(file_path=file_path, max_related=max(1, related_cap - 1)),
                     "entrypoint_chain": adapter.entrypoint_chain_for(file_path=file_path, max_depth=4),
@@ -1440,6 +1658,617 @@ class ProjectionExporter:
         }
 
     @classmethod
+    def _build_final_cognition_envelope(
+        cls,
+        projection: Dict[str, Any],
+        metrics: ProjectionMetrics,
+        active_zone: str,
+        query_source: str,
+        model_name: str,
+        model_source: str,
+        issue_query: str,
+        runtime_context: Dict[str, Any],
+        adapter: Any,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        profile_name = str(
+            projection.get("profile")
+            or projection.get("projection_profile", {}).get("profile")
+            or metrics.profile
+            or "small_local"
+        )
+        profile_view = projection.get("projection_profile", {}) if isinstance(projection.get("projection_profile", {}), dict) else {}
+        model_detection = projection.get("model_detection", {}) if isinstance(projection.get("model_detection", {}), dict) else {}
+        is_small = profile_name == "small_local"
+        is_medium = profile_name == "medium_local"
+        is_frontier = profile_name in {
+            "frontier_online",
+            "reasoning_frontier",
+            "agentic_frontier",
+            "large_local",
+        }
+        derived_profile_class = "frontier" if is_frontier else "local"
+        derived_reasoning_capability_class = (
+            "small" if is_small else "medium" if is_medium else "frontier" if is_frontier else "medium"
+        )
+
+        runtime_targets = projection.get("runtime_targets", []) if isinstance(projection.get("runtime_targets", []), list) else []
+        secondary_neighbors = projection.get("secondary_neighbors", []) if isinstance(projection.get("secondary_neighbors", []), list) else []
+        continuity = projection.get("active_engineering_continuity", {}) if isinstance(projection.get("active_engineering_continuity", {}), dict) else {}
+        continuity_summary = projection.get("engineering_continuity_summary", {}) if isinstance(projection.get("engineering_continuity_summary", {}), dict) else {}
+        confidence_projection = projection.get("confidence_projection", {}) if isinstance(projection.get("confidence_projection", {}), dict) else {}
+        pecs_telemetry = projection.get("pecs_lite_telemetry", {}) if isinstance(projection.get("pecs_lite_telemetry", {}), dict) else {}
+
+        chains = continuity.get("chains", []) if isinstance(continuity.get("chains", []), list) else []
+        identity_from_runtime = runtime_context.get("model_identity_input", {}) if isinstance(runtime_context.get("model_identity_input", {}), dict) else {}
+        unknown_model_identity = bool(runtime_context.get("unknown_model_identity", False))
+        identity_missing_fields = runtime_context.get("identity_missing_fields", []) if isinstance(runtime_context.get("identity_missing_fields", []), list) else []
+        profile_class = str(identity_from_runtime.get("profile_class", "") or "").strip().lower() or derived_profile_class
+        local_vs_frontier = str(identity_from_runtime.get("local_vs_frontier", "") or "").strip().lower() or profile_class
+        reasoning_capability_class = str(identity_from_runtime.get("reasoning_capability_class", "") or "").strip().lower() or derived_reasoning_capability_class
+        strongest_chain = chains[0] if chains else {}
+
+        continuity_survivability = float(continuity.get("continuity_survivability_confidence", 0.0) or 0.0)
+        locality_authority = float(continuity.get("locality_authority_confidence", 0.0) or 0.0)
+        topology_mismatch = float(continuity.get("topology_mismatch_suspicion", 0.0) or 0.0)
+        duplicate_shadow = float(continuity.get("duplicate_shadow_suspicion", 0.0) or 0.0)
+        dead_execution = float(continuity.get("dead_execution_path_suspicion", 0.0) or 0.0)
+        runtime_confirmed_locality = bool(continuity.get("runtime_confirmed_locality", False))
+
+        wrapper_score = max(
+            1.0 if bool(projection.get("wrapper_warning")) else 0.0,
+            duplicate_shadow,
+            topology_mismatch,
+            dead_execution,
+            max(
+                [
+                    1.0 if isinstance(target, dict) and str(target.get("predicted_failure_mode", "")) == "wrapper_indirection" else 0.0
+                    for target in runtime_targets
+                ]
+                or [0.0]
+            ),
+        )
+        divergence_floor = max(0.0, 1.0 - continuity_survivability)
+        if not runtime_targets and chains:
+            divergence_floor = max(0.0, divergence_floor * 0.65)
+        divergence_score = max(topology_mismatch, duplicate_shadow, dead_execution, divergence_floor)
+        gravity_score = max(locality_authority, continuity_survivability)
+        continuity_cluster_strength = max(
+            (
+                float(item.get("share", 0.0) or 0.0)
+                for item in (continuity.get("canonical_authority_clusters", []) or [])
+                if isinstance(item, dict)
+            ),
+            default=0.0,
+        )
+        historical_gravity = min(1.0, float(continuity.get("historical_engineering_gravity", 0.0) or 0.0))
+        continuity_condensation = min(1.0, float(continuity.get("continuity_condensation_score", 0.0) or 0.0))
+        continuity_emergence_contribution = round(
+            min(
+                1.0,
+                continuity_cluster_strength * 0.30
+                + continuity_survivability * 0.30
+                + historical_gravity * 0.20,
+            ),
+            3,
+        )
+        historical_authority_emergence_weight = round(
+            min(
+                1.0,
+                historical_gravity * 0.38
+                + continuity_cluster_strength * 0.28
+                + continuity_condensation * 0.20,
+            ),
+            3,
+        )
+        sparse_emergence_assistance = bool(
+            not runtime_targets
+            and continuity_cluster_strength >= 0.15
+            and historical_gravity >= 0.4
+        )
+        continuity_vs_runtime_balance = round(
+            min(
+                1.0,
+                0.35 * historical_gravity
+                + 0.35 * continuity_cluster_strength
+                + 0.30 * (0.0 if runtime_targets else 1.0),
+            ),
+            3,
+        )
+        runtime_historical_reconciliation_weight = round(
+            min(
+                1.0,
+                0.30 * historical_gravity
+                + 0.30 * continuity_emergence_contribution
+                + 0.25 * continuity_cluster_strength,
+            ),
+            3,
+        )
+        convergence_score = min(1.0, 0.35 + (0.18 * max(0, len(chains) - 1)) + (0.15 if runtime_confirmed_locality else 0.0)) if chains else 0.0
+        target_confidences = [
+            float(target.get("confidence", 0.0) or 0.0)
+            for target in runtime_targets
+            if isinstance(target, dict)
+        ]
+        confidence_total = sum(target_confidences)
+        runtime_concentration_score = (
+            (max(target_confidences) / confidence_total)
+            if confidence_total > 0.0 and target_confidences
+            else 0.0
+        )
+        chain_confidences = [
+            float(chain.get("continuity_confidence", 0.0) or 0.0)
+            for chain in chains
+            if isinstance(chain, dict)
+        ]
+        chain_confidence_total = sum(chain_confidences)
+        chain_concentration_score = (
+            (max(chain_confidences) / chain_confidence_total)
+            if chain_confidence_total > 0.0 and chain_confidences
+            else 0.0
+        )
+        max_chain_confidence = max(chain_confidences) if chain_confidences else 0.0
+        authority_concentration_score = 0.0
+        if runtime_targets and chains:
+            authority_concentration_score = (0.67 * runtime_concentration_score) + (0.33 * chain_concentration_score)
+        elif runtime_targets:
+            authority_concentration_score = runtime_concentration_score
+        elif chains:
+            authority_concentration_score = min(0.93, 0.30 + (0.45 * chain_concentration_score) + (0.25 * max_chain_confidence))
+
+        topology_noise_ratio = round(
+            min(
+                1.0,
+                float(metrics.inactive_locality_suppressed or 0)
+                / float((metrics.inactive_locality_suppressed or 0) + len(runtime_targets) + len(secondary_neighbors) + 1),
+            ),
+            3,
+        )
+        locality_entropy_after = round(max(0.0, min(1.0, 1.0 - float(metrics.entropy_reduction_score or 0.0))), 3)
+        locality_entropy_before = round(min(1.0, locality_entropy_after + float(metrics.entropy_reduction_score or 0.0)), 3)
+        authority_confidence_band = (
+            "high"
+            if authority_concentration_score >= 0.75
+            else "medium"
+            if authority_concentration_score >= 0.45
+            else "low"
+        )
+
+        model_identity_input = {
+            "model_name": str(identity_from_runtime.get("model_name", "") or model_name or ("unknown" if unknown_model_identity else model_detection.get("model_name", "")) or ""),
+            "model_source": str(identity_from_runtime.get("model_source", "") or model_source or ("unknown" if unknown_model_identity else model_detection.get("model_source", "")) or ""),
+            "provider": str(identity_from_runtime.get("provider", "") or model_source or ("unknown" if unknown_model_identity else model_detection.get("model_source", "")) or ""),
+            "context_window": int(identity_from_runtime.get("context_window", 0) or model_detection.get("context_window", 0) or 0),
+            "profile_class": profile_class,
+            "local_vs_frontier": local_vs_frontier,
+            "reasoning_capability_class": reasoning_capability_class,
+            "projection_profile": profile_name,
+            "capability_class": str(profile_view.get("capability_class", "") or ""),
+            "unknown_model_identity": unknown_model_identity,
+            "identity_missing_fields": identity_missing_fields,
+        }
+
+        advisories: List[Dict[str, Any]] = []
+
+        def add(verb: str, score: float, reason: str, evidence: Dict[str, Any]) -> None:
+            advisories.append(
+                {
+                    "verb": verb,
+                    "confidence": round(max(0.0, min(1.0, score)), 3),
+                    "reason": reason,
+                    "evidence": evidence,
+                    "advisory_only": True,
+                }
+            )
+
+        wrapper_threshold = 0.25 if is_small else 0.32 if is_medium else 0.35
+        if wrapper_score >= wrapper_threshold:
+            add(
+                "rewire",
+                max(wrapper_score, 0.74 if is_small else 0.67 if is_medium else 0.56),
+                "Runtime wrapper currently routes execution; wrapper inflation risk is elevated and may hide the mature implementation surface.",
+                {"signal": "wrapper_inflation", "score": round(wrapper_score, 3)},
+            )
+
+        divergence_threshold = 0.22 if is_small else 0.26 if is_medium else 0.30
+        if divergence_score >= divergence_threshold:
+            add(
+                "reconcile",
+                max(divergence_score, 0.72 if is_small else 0.69 if is_medium else 0.64),
+                "Runtime-vs-historical locality divergence is visible; reconciliation may be preferable to isolated local patching.",
+                {
+                    "signal": "runtime_historical_divergence",
+                    "topology_mismatch_suspicion": round(topology_mismatch, 3),
+                    "duplicate_shadow_suspicion": round(duplicate_shadow, 3),
+                    "dead_execution_path_suspicion": round(dead_execution, 3),
+                },
+            )
+
+        if gravity_score >= 0.70:
+            add(
+                "preserve",
+                max(gravity_score, 0.68 if is_small else 0.74),
+                "Historically mature implementation appears concentrated here; preserving the accepted anchor keeps continuity stable while evidence is reconciled.",
+                {
+                    "signal": "continuity_survivability",
+                    "locality_authority_confidence": round(locality_authority, 3),
+                    "continuity_survivability_confidence": round(continuity_survivability, 3),
+                },
+            )
+
+        if convergence_score >= 0.45:
+            add(
+                "consolidate",
+                convergence_score,
+                "Convergent locality evidence is present; concentration around the highest-survivability anchor may reduce fragmentation risk.",
+                {"signal": "convergence_opportunity", "chain_count": len(chains)},
+            )
+
+        if (duplicate_shadow >= 0.22 or dead_execution >= 0.30) and (not is_small or max(duplicate_shadow, dead_execution) >= 0.80):
+            add(
+                "split",
+                max(duplicate_shadow, dead_execution, 0.55 if is_frontier else 0.60 if is_medium else 0.48),
+                "Fragmentation risk detected across competing shadows or dead paths; separating these pressures can keep advisory reasoning clearer.",
+                {
+                    "signal": "scattering_suspicion",
+                    "duplicate_shadow_suspicion": round(duplicate_shadow, 3),
+                    "dead_execution_path_suspicion": round(dead_execution, 3),
+                },
+            )
+
+        if topology_mismatch >= 0.35 and (not is_small or topology_mismatch >= 0.82):
+            add(
+                "refactor",
+                max(topology_mismatch, 0.57 if is_medium else 0.61),
+                "Topology mismatch pressure is visible; reshaping the reasoning surface may reduce repeated locality drift.",
+                {"signal": "topology_mismatch", "score": round(topology_mismatch, 3)},
+            )
+
+        if wrapper_score >= 0.45 and gravity_score > 0.60:
+            add(
+                "migrate",
+                min(0.9, max(wrapper_score, gravity_score) - 0.02),
+                "A stronger gravity surface is visible away from wrapper-adjacent paths; migration attention may improve continuity survivability.",
+                {"signal": "preferred_engineering_gravity", "wrapper_score": round(wrapper_score, 3), "gravity_score": round(gravity_score, 3)},
+            )
+
+        if is_small and (runtime_targets or chains) and authority_concentration_score >= 0.78:
+            add(
+                "preserve",
+                min(0.87, 0.62 + authority_concentration_score * 0.25),
+                "Small-profile reasoning benefits from mature-authority concentration; keeping the strongest anchor helps avoid noisy dispersion.",
+                {
+                    "signal": "mature_authority_concentration",
+                    "authority_concentration_score": round(authority_concentration_score, 3),
+                    "runtime_target_count": len(runtime_targets),
+                    "continuity_chain_count": len(chains),
+                },
+            )
+
+        if is_medium and (runtime_targets or chains) and authority_concentration_score >= 0.72:
+            add(
+                "consolidate",
+                min(0.86, 0.58 + authority_concentration_score * 0.22),
+                "Medium-profile reasoning can weight the mature authority surface earlier while preserving advisory plurality.",
+                {
+                    "signal": "authority_concentration",
+                    "authority_concentration_score": round(authority_concentration_score, 3),
+                    "runtime_target_count": len(runtime_targets),
+                    "secondary_neighbor_count": len(secondary_neighbors),
+                    "continuity_chain_count": len(chains),
+                },
+            )
+
+        if not runtime_targets and chains and max_chain_confidence >= (0.62 if is_small else 0.56 if is_medium else 0.50):
+            add(
+                "preserve",
+                min(0.89, 0.50 + (0.30 * max_chain_confidence) + (0.10 * chain_concentration_score)),
+                "Sparse runtime locality is currently observed; historically mature continuity still appears concentrated and may warrant preservation.",
+                {
+                    "signal": "sparse_runtime_mature_continuity",
+                    "max_chain_confidence": round(max_chain_confidence, 3),
+                    "chain_concentration_score": round(chain_concentration_score, 3),
+                    "runtime_target_count": len(runtime_targets),
+                },
+            )
+
+        if is_frontier and len(runtime_targets) >= 1:
+            add(
+                "preserve",
+                min(0.93, gravity_score + 0.06),
+                "Frontier models can retain richer continuity context; preserve the high-confidence anchor set while comparing tensions.",
+                {"signal": "frontier_continuity_depth", "primary_anchor_count": len(runtime_targets)},
+            )
+            if len(secondary_neighbors) >= 1:
+                add(
+                    "split",
+                    min(0.82, 0.52 + len(secondary_neighbors) * 0.04),
+                    "Frontier profile can hold competing advisory surfaces simultaneously; keep ambiguity visible while comparing anchors.",
+                    {
+                        "signal": "frontier_advisory_plurality",
+                        "secondary_neighbor_count": len(secondary_neighbors),
+                    },
+                )
+        elif is_medium and len(confidence_projection.get("primary", [])) >= 1 and gravity_score >= 0.6:
+            add(
+                "preserve",
+                min(0.88, gravity_score + 0.04),
+                "Medium models should keep the anchor but stay compact; preserve the strongest gravity signal and avoid over-expansion.",
+                {"signal": "compressed_continuity_preservation", "primary_anchor_count": len(confidence_projection.get("primary", []))},
+            )
+        elif is_small and gravity_score >= 0.60:
+            add(
+                "preserve",
+                min(0.84, gravity_score + 0.03),
+                "Small models need a compact anchor; preserve the strongest continuity gravity and ignore verbose provenance.",
+                {"signal": "compact_anchor", "primary_anchor_count": len(confidence_projection.get("primary", []))},
+            )
+
+        signal_priority_map = {
+            "reconcile": 0,
+            "preserve": 1,
+            "rewire": 2,
+            "split": 3,
+            "consolidate": 4,
+            "refactor": 5,
+            "migrate": 6,
+        }
+        suppression_reason_breakdown = {
+            "weak_topology_neighbors": int(len(secondary_neighbors) > len(runtime_targets) and len(secondary_neighbors) > 0),
+            "broad_runtime_spread": int(metrics.locality_breadth_score >= 0.55),
+            "low_confidence_locality_noise": int(sum(1 for score in target_confidences if score < 0.45) > 0),
+            "redundant_structural_metadata": int(metrics.inactive_locality_suppressed > (len(runtime_targets) + len(secondary_neighbors))),
+        }
+
+        advisory_by_verb: Dict[str, Dict[str, Any]] = {}
+        for advisory in advisories:
+            verb = str(advisory.get("verb", "") or "")
+            existing = advisory_by_verb.get(verb)
+            if existing is None or float(advisory.get("confidence", 0.0) or 0.0) > float(existing.get("confidence", 0.0) or 0.0):
+                advisory_by_verb[verb] = advisory
+        advisories = list(advisory_by_verb.values())
+
+        advisories.sort(
+            key=lambda item: (
+                signal_priority_map.get(str(item.get("verb", "")), 99),
+                -float(item.get("confidence", 0.0) or 0.0),
+            )
+        )
+        max_advisories = 2 if is_small else 4 if is_medium else 6
+        advisories = advisories[:max_advisories]
+        advisory_signal_priority = [str(item.get("verb", "")) for item in advisories if str(item.get("verb", ""))]
+        cognition_density_score = round(
+            min(
+                1.0,
+                float(len(advisories))
+                / float(max(1, len(runtime_targets) + len(secondary_neighbors) + len(chains))),
+            ),
+            3,
+        )
+
+        all_modes = ["reconcile", "consolidate", "migrate", "preserve", "split", "refactor", "rewire"]
+        emitted_modes = list(dict.fromkeys([str(item.get("verb", "")) for item in advisories if str(item.get("verb", ""))]))
+        discarded_modes = [mode for mode in all_modes if mode not in emitted_modes]
+
+        omitted_sections: List[str] = []
+        if "execution_enrichment" not in projection:
+            omitted_sections.append("execution_enrichment")
+        if not projection.get("active_engineering_continuity"):
+            omitted_sections.append("active_engineering_continuity")
+        enrichment = projection.get("execution_enrichment", {}) if isinstance(projection.get("execution_enrichment", {}), dict) else {}
+        for section in ("execution_neighborhood", "execution_continuity", "continuity_context"):
+            if section not in enrichment:
+                omitted_sections.append(section)
+
+        emitted_advisory_cognition = {
+            "profile": profile_name,
+            "mode": "compact_advisory" if is_small else "bounded_advisory" if is_medium else "rich_advisory",
+            "summary": "; ".join(f"{item['verb']}: {item['reason']}" for item in advisories),
+            "model_identity_input": model_identity_input,
+            "authority_concentration_score": round(authority_concentration_score, 3),
+            "strongest_tension": {
+                "kind": "wrapper_inflation" if wrapper_score >= divergence_score else "continuity_divergence",
+                "score": round(max(wrapper_score, divergence_score), 3),
+                "advisory": "rewire" if wrapper_score >= divergence_score else "reconcile",
+            },
+            "strongest_gravity_indicator": {
+                "kind": "continuity_survivability",
+                "score": round(gravity_score, 3),
+                "advisory": "preserve" if gravity_score >= 0.6 else "consolidate",
+            },
+            "strongest_divergence_indicator": {
+                "kind": "runtime_historical_divergence",
+                "score": round(divergence_score, 3),
+                "advisory": "reconcile" if divergence_score >= 0.35 else "refactor",
+            },
+            "preferred_engineering_gravity": {
+                "signal": "accepted continuity anchor" if gravity_score >= 0.6 else "counter-pressure surface",
+                "score": round(gravity_score, 3),
+            },
+            "advisories": advisories,
+            "advisory_signal_priority": advisory_signal_priority,
+            "continuity_emergence_contribution": continuity_emergence_contribution,
+            "historical_authority_emergence_weight": historical_authority_emergence_weight,
+            "sparse_emergence_assistance": sparse_emergence_assistance,
+            "runtime_historical_reconciliation_weight": runtime_historical_reconciliation_weight,
+            "continuity_vs_runtime_balance": continuity_vs_runtime_balance,
+            "emergence_source_breakdown": {
+                "runtime_signal": round(min(1.0, len(runtime_targets) / max(1, len(runtime_targets) + len(secondary_neighbors))), 3),
+                "continuity_signal": continuity_emergence_contribution,
+                "cluster_signal": continuity_cluster_strength,
+            },
+            "suppression_reason_breakdown": suppression_reason_breakdown,
+            "authority_confidence_band": authority_confidence_band,
+            "cognition_density_score": cognition_density_score,
+            "topology_noise_ratio": topology_noise_ratio,
+        }
+
+        if is_frontier:
+            emitted_advisory_cognition["convergence_opportunities"] = [
+                {
+                    "kind": "accepted_locality",
+                    "score": round(float(chain.get("continuity_confidence", 0.0) or 0.0), 3),
+                    "signal": str(chain.get("accepted_locality", "")),
+                }
+                for chain in chains[:4]
+                if isinstance(chain, dict)
+            ]
+            emitted_advisory_cognition["continuity_context"] = {
+                "runtime_confirmation_density": float(continuity.get("runtime_confirmation_density", 0.0) or 0.0),
+                "accepted_anchor_count": len(chains),
+                "note": "frontier retains richer continuity reasoning while staying advisory only",
+            }
+
+        discarded_cognition_summary = {
+            "profile": profile_name,
+            "preserved_advisory_modes": emitted_modes,
+            "removed_advisory_modes": discarded_modes,
+            "omitted_enrichment_sections": sorted(set(omitted_sections)),
+            "trimmed_target_sets": {
+                "raw_candidates_suppressed": metrics.inactive_locality_suppressed,
+                "primary_targets_emitted": len(runtime_targets),
+                "secondary_neighbors_emitted": len(secondary_neighbors),
+                "continuity_chains_emitted": len(chains),
+            },
+            "compressed_away": [
+                "verbose provenance chains",
+                "raw topology dumps",
+                "workspace scan narratives",
+            ],
+            "cognition_survivability_summary": {
+                "continuity_survivability_confidence": round(continuity_survivability, 3),
+                "runtime_confirmed_locality": runtime_confirmed_locality,
+                "authority_concentration_score": round(authority_concentration_score, 3),
+                "locality_entropy_before": locality_entropy_before,
+                "locality_entropy_after": locality_entropy_after,
+            },
+            "suppression_reason_breakdown": suppression_reason_breakdown,
+            "advisory_signal_priority": advisory_signal_priority,
+            "authority_confidence_band": authority_confidence_band,
+            "cognition_density_score": cognition_density_score,
+            "topology_noise_ratio": topology_noise_ratio,
+            "continuity_reasoning_compressed": not is_frontier,
+            "topology_reasoning_compressed": is_small or is_medium,
+        }
+
+        shaping_losses = {
+            "model_identity_input": model_identity_input,
+            "profile_class": profile_class,
+            "preserved_advisory_modes": emitted_modes,
+            "advisory_modes_removed": discarded_modes,
+            "target_pruning_count": metrics.inactive_locality_suppressed,
+            "continuity_compression": "high" if is_small else "moderate" if is_medium else "bounded",
+            "omitted_enrichment_sections": sorted(set(omitted_sections)),
+            "authority_concentration_score": round(authority_concentration_score, 3),
+            "locality_entropy_before": locality_entropy_before,
+            "locality_entropy_after": locality_entropy_after,
+            "suppression_reason_breakdown": suppression_reason_breakdown,
+            "advisory_signal_priority": advisory_signal_priority,
+            "authority_confidence_band": authority_confidence_band,
+            "cognition_density_score": cognition_density_score,
+            "topology_noise_ratio": topology_noise_ratio,
+        }
+
+        continuity_cluster_strength = max(
+            (
+                float(item.get("share", 0.0) or 0.0)
+                for item in (continuity_summary.get("canonical_authority_clusters", []) or [])
+                if isinstance(item, dict)
+            ),
+            default=0.0,
+        )
+        continuity_emergence_contribution = round(
+            min(
+                1.0,
+                continuity_cluster_strength * 0.30
+                + continuity_summary.get("historical_engineering_gravity", 0.0) * 0.40
+                + continuity_summary.get("reconstructed_lineage_density", 0.0) * 0.25,
+            ),
+            3,
+        )
+        historical_authority_emergence_weight = round(
+            min(
+                1.0,
+                continuity_summary.get("historical_engineering_gravity", 0.0) * 0.38
+                + continuity_cluster_strength * 0.28
+                + continuity_summary.get("continuity_condensation_score", 0.0) * 0.20,
+            ),
+            3,
+        )
+        sparse_emergence_assistance = bool(
+            not runtime_targets
+            and continuity_cluster_strength >= 0.15
+            and continuity_summary.get("historical_engineering_gravity", 0.0) >= 0.4
+        )
+        continuity_vs_runtime_balance = round(
+            min(
+                1.0,
+                0.35 * continuity_summary.get("historical_engineering_gravity", 0.0)
+                + 0.35 * continuity_cluster_strength
+                + 0.30 * (0.0 if runtime_targets else 1.0),
+            ),
+            3,
+        )
+        runtime_historical_reconciliation_weight = round(
+            min(
+                1.0,
+                0.30 * continuity_summary.get("historical_engineering_gravity", 0.0)
+                + 0.30 * continuity_summary.get("reconstructed_lineage_density", 0.0)
+                + 0.25 * continuity_cluster_strength
+                + 0.10 * continuity_summary.get("continuity_condensation_score", 0.0),
+            ),
+            3,
+        )
+
+        final_emission_observability = {
+            "timestamp": metrics.diagnostic_timestamp,
+            "session_id": str(runtime_context.get("session_id", "") or runtime_context.get("session", "") or ""),
+            "query": str(issue_query or ""),
+            "query_source": str(query_source or "unknown"),
+            "model_name": str(model_name or ""),
+            "model_source": str(model_source or ""),
+            "model_identity_input": model_identity_input,
+            "profile_class": profile_class,
+            "adapter": str(type(adapter).__name__ if adapter is not None else "unknown"),
+            "selected_projection_profile": profile_name,
+            "unknown_model_identity": unknown_model_identity,
+            "identity_missing_fields": identity_missing_fields,
+            "preserved_advisory_modes": emitted_modes,
+            "removed_advisory_modes": discarded_modes,
+            "cognition_survivability_summary": discarded_cognition_summary.get("cognition_survivability_summary", {}),
+            "authority_concentration_score": round(authority_concentration_score, 3),
+            "locality_entropy_before": locality_entropy_before,
+            "locality_entropy_after": locality_entropy_after,
+            "suppression_reason_breakdown": suppression_reason_breakdown,
+            "advisory_signal_priority": advisory_signal_priority,
+            "authority_confidence_band": authority_confidence_band,
+            "cognition_density_score": cognition_density_score,
+            "topology_noise_ratio": topology_noise_ratio,
+            "reconstructed_lineage_density": continuity_summary.get("reconstructed_lineage_density", 0.0),
+            "continuity_reconstruction_confidence": continuity_summary.get("continuity_reconstruction_confidence", 0.0),
+            "historical_engineering_gravity": continuity_summary.get("historical_engineering_gravity", 0.0),
+            "continuity_condensation_score": continuity_summary.get("continuity_condensation_score", 0.0),
+            "protected_authority_reinforcement": continuity_summary.get("protected_authority_reinforcement", {}),
+            "lineage_fragmentation_score": continuity_summary.get("lineage_fragmentation_score", 0.0),
+            "canonical_authority_clusters": continuity_summary.get("canonical_authority_clusters", []),
+            "continuity_emergence_contribution": continuity_emergence_contribution,
+            "historical_authority_emergence_weight": historical_authority_emergence_weight,
+            "sparse_emergence_assistance": sparse_emergence_assistance,
+            "runtime_historical_reconciliation_weight": runtime_historical_reconciliation_weight,
+            "continuity_vs_runtime_balance": continuity_vs_runtime_balance,
+            "emergence_source_breakdown": {
+                "runtime_signal": round(min(1.0, len(runtime_targets) / max(1, len(runtime_targets) + len(secondary_neighbors))), 3),
+                "continuity_signal": continuity_emergence_contribution,
+                "cluster_signal": continuity_cluster_strength,
+            },
+            "token_budget_selected": int(pecs_telemetry.get("token_budget_selected", 0) or 0),
+            "runtime_targets_count": len(runtime_targets),
+            "secondary_neighbors_count": len(secondary_neighbors),
+            "active_zone": str(active_zone),
+        }
+
+        return emitted_advisory_cognition, discarded_cognition_summary, shaping_losses, final_emission_observability
+
+    @classmethod
     def _build_active_engineering_continuity(
         cls,
         profile: str,
@@ -1477,6 +2306,9 @@ class ProjectionExporter:
                         ],
                     }
                 ],
+                "canonical_authority_clusters": (
+                    continuity_signals.get("canonical_authority_clusters", []) or []
+                )[:1],
                 "note": "tiny accepted continuity anchor only",
             }
 
@@ -1500,6 +2332,9 @@ class ProjectionExporter:
                     }
                     for chain in high_confidence[:2]
                 ],
+                "canonical_authority_clusters": (
+                    continuity_signals.get("canonical_authority_clusters", []) or []
+                )[:2],
                 "note": "bounded accepted continuity chains for medium profile",
             }
 
@@ -1523,5 +2358,8 @@ class ProjectionExporter:
                 }
                 for chain in high_confidence[:4]
             ],
+            "canonical_authority_clusters": (
+                continuity_signals.get("canonical_authority_clusters", []) or []
+            )[:4],
             "note": "structured engineering continuity only; no raw chat history",
         }

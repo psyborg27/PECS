@@ -57,4 +57,6 @@ if ! command -v "$PYTHON_CMD" >/dev/null 2>&1; then
   exit 1
 fi
 
-"$PYTHON_CMD" "$SCRIPT_DIR/append_ai_chat_history.py" "$WORKSPACE_ROOT" --source "$SOURCE" --message "$MESSAGE"
+# Prefer installed module over local copy — ensures installed runtime version is used.
+"$PYTHON_CMD" -m append_ai_chat_history "$WORKSPACE_ROOT" --source "$SOURCE" --message "$MESSAGE" 2>/dev/null || \
+  "$PYTHON_CMD" "$SCRIPT_DIR/append_ai_chat_history.py" "$WORKSPACE_ROOT" --source "$SOURCE" --message "$MESSAGE"

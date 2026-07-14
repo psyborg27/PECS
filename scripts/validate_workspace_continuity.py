@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, TypedDict
 
-from export_workspace_continuity import export_workspace_continuity
+from .export_workspace_continuity import export_workspace_continuity
 
 EXPECTED_JSON_REQUIRED_KEYS = {
     "active_topology.json": {

@@ -397,22 +397,24 @@ def _cmd_observe_projection_daemon(args: argparse.Namespace) -> None:
 
 
 def _run_workspace_bridge(workspace_root: Path, command: str) -> None:
-    bridge_runner = workspace_root / ".pecs" / "bridge" / "run_bridge.py"
-    if not bridge_runner.exists():
-        raise FileNotFoundError(
-            f"Workspace bridge not installed: {bridge_runner}. Run init first."
-        )
+    """Run workspace bridge command by importing from installed PECS runtime.
 
-    subprocess.run(
-        [
-            sys.executable,
-            str(bridge_runner),
-            command,
-            "--workspace",
-            str(workspace_root),
-        ],
-        check=True,
-    )
+    Breaks the circular dependency pattern: instead of calling the workspace-local
+    bridge runner (which then called local copies of the scripts), this imports
+    directly from the installed ``scripts`` package. The workspace-local bridge
+    runner (run_bridge.py) is a thin CLI for VS Code task invocation that also
+    delegates to the installed runtime via ``python -m workspace_bridge_cli``.
+    """
+    if command == "refresh":
+        from scripts.export_workspace_continuity import export_workspace_continuity
+        result = export_workspace_continuity(workspace_root)
+        logger.debug("Bridge refresh completed: %d artifacts written", len(result) if isinstance(result, dict) else 0)
+    elif command == "validate":
+        from scripts.validate_workspace_continuity import validate_workspace_continuity
+        result = validate_workspace_continuity(workspace_root)
+        logger.debug("Bridge validate completed")
+    else:
+        raise ValueError(f"Unknown bridge command: {command}")
 
 
 def _is_process_running(pid: int) -> bool:

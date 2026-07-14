@@ -355,8 +355,6 @@
       ".pecs/README_WORKSPACE_PREPARATION.md",
       ".pecs/tools/append_ai_chat_history.py",
       ".pecs/bridge/run_bridge.py",
-      ".pecs/bridge/export_workspace_continuity.py",
-      ".pecs/bridge/validate_workspace_continuity.py",
       ".continue/rules/pecs-first-routing.yaml"
     ]
   }

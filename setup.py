@@ -4,7 +4,7 @@ setup(
     name="pecs_pro",
     version="1.0.0-alpha1",
     description="PECS-PRO workspace continuity cache and daemon",
-    packages=find_packages(where="."),
+    packages=find_packages(where=".", include=["pecs_pro", "continuity*", "evidence_correlation*", "execution_graph*", "exports*", "integrations*", "navigation_builder*", "runtime*", "scripts*", "topology*", "validation*", "workspace_assets*", "workspace_registry*"]),
     py_modules=[
         "append_ai_chat_history",
         "install_workspace_integration",

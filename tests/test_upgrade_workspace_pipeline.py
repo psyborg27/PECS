@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -63,6 +64,38 @@ class UpgradeWorkspacePipelineTests(unittest.TestCase):
                 (workspace_root / ".pecs" / "backups").resolve(),
             )
             self.assertIn(".github/copilot-instructions.md", report.merged_files)
+
+    def test_upgrade_pipeline_detects_stale_local_runtime_copy(self):
+        repo_root = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace_root = Path(tmpdir)
+            stale_runtime_dir = workspace_root / ".pecs" / "pecs_pro"
+            stale_egg_info_dir = workspace_root / ".pecs" / "pecs_pro.egg-info"
+            stale_runtime_dir.mkdir(parents=True, exist_ok=True)
+            stale_egg_info_dir.mkdir(parents=True, exist_ok=True)
+
+            pipeline = UpgradeWorkspacePipeline(workspace_root, repo_root)
+            plan = pipeline.inspect_workspace()
+
+            self.assertIn(".pecs/pecs_pro", plan.stale_workspace_runtime_paths)
+            self.assertIn(".pecs/pecs_pro.egg-info", plan.stale_workspace_runtime_paths)
+
+    def test_upgrade_pipeline_reads_install_root_binding(self):
+        repo_root = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace_root = Path(tmpdir)
+            config_dir = workspace_root / ".pecs" / "config"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "install_root.json").write_text(
+                json.dumps({"install_root": str(repo_root.resolve())}),
+                encoding="utf-8",
+            )
+
+            pipeline = UpgradeWorkspacePipeline(workspace_root, repo_root)
+            plan = pipeline.inspect_workspace()
+
+            self.assertEqual(plan.workspace_install_root, repo_root.resolve())
+            self.assertTrue(plan.workspace_install_root_matches_repo_root)
 
     def test_run_validate_workspace_accepts_bridge_json_without_success_key(self):
         repo_root = Path.cwd()

@@ -25,7 +25,7 @@ pecs-pro-daemon = "run_pecs_daemon:main"
 pecs-pro-install-workspace = "install_workspace_integration:main"
 
 [tool.setuptools]
-packages = {find = {where = ["."], include = ["pecs_pro", "continuity*", "evidence_correlation*", "execution_graph*", "exports*", "integrations*", "navigation_builder*", "runtime*", "topology*", "validation*", "workspace_assets*", "workspace_registry*"]}}
+packages = {find = {where = ["."], include = ["pecs_pro", "continuity*", "evidence_correlation*", "execution_graph*", "exports*", "integrations*", "navigation_builder*", "runtime*", "scripts*", "topology*", "validation*", "workspace_assets*", "workspace_registry*"]}}
 py-modules = [
   "append_ai_chat_history",
   "install_workspace_integration",

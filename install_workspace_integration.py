@@ -914,7 +914,11 @@ set MESSAGE=%*
 if "%WORKSPACE_ROOT%"=="" set WORKSPACE_ROOT=.
 set PYTHON_EXEC=python
 where python >nul 2>&1 || set PYTHON_EXEC=py -3
-"%PYTHON_EXEC%" "%SCRIPT_DIR%append_ai_chat_history.py" "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!"
+rem Prefer installed module over local copy for current runtime
+"%PYTHON_EXEC%" -m append_ai_chat_history "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!" 2>nul
+if errorlevel 1 (
+  "%PYTHON_EXEC%" "%SCRIPT_DIR%append_ai_chat_history.py" "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!"
+)
 """,
     backup_suffix="pecs-tool-backup",
     )
@@ -929,7 +933,11 @@ $RemainingArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $python) { Write-Error "Python is not available on PATH"; exit 1 }
-& $python.Source (Join-Path $ScriptDir "append_ai_chat_history.py") $WorkspaceRoot @RemainingArgs
+# Prefer installed module over local copy for current runtime
+$result = & $python.Source -m append_ai_chat_history $WorkspaceRoot @RemainingArgs 2>$null
+if ($LASTEXITCODE -ne 0) {
+  & $python.Source (Join-Path $ScriptDir "append_ai_chat_history.py") $WorkspaceRoot @RemainingArgs
+}
 """,
     backup_suffix="pecs-tool-backup",
     )
@@ -949,7 +957,11 @@ set MESSAGE=%*
 if "%WORKSPACE_ROOT%"=="" set WORKSPACE_ROOT=.
 set PYTHON_EXEC=python
 where python >nul 2>&1 || set PYTHON_EXEC=py -3
-"%PYTHON_EXEC%" "%SCRIPT_DIR%append_ai_chat_history.py" "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!"
+rem Prefer installed module over local copy for current runtime
+"%PYTHON_EXEC%" -m append_ai_chat_history "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!" 2>nul
+if errorlevel 1 (
+  "%PYTHON_EXEC%" "%SCRIPT_DIR%append_ai_chat_history.py" "%WORKSPACE_ROOT%" --source "!SOURCE!" --message "!MESSAGE!"
+)
 """,
     backup_suffix="pecs-tool-backup",
     )
@@ -964,7 +976,11 @@ $RemainingArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $python) { Write-Error "Python is not available on PATH"; exit 1 }
-& $python.Source (Join-Path $ScriptDir "append_ai_chat_history.py") $WorkspaceRoot @RemainingArgs
+# Prefer installed module over local copy for current runtime
+$result = & $python.Source -m append_ai_chat_history $WorkspaceRoot @RemainingArgs 2>$null
+if ($LASTEXITCODE -ne 0) {
+  & $python.Source (Join-Path $ScriptDir "append_ai_chat_history.py") $WorkspaceRoot @RemainingArgs
+}
 """,
     backup_suffix="pecs-tool-backup",
     )
@@ -992,35 +1008,45 @@ def _install_bridge_runtime(workspace_root: Path, repo_root: Path) -> None:
         backup_suffix="pecs-runtime-backup",
     )
 
-    export_source = repo_root / "scripts" / "export_workspace_continuity.py"
-    validate_source = repo_root / "scripts" / "validate_workspace_continuity.py"
+    # Bridge scripts are NOT copied to the workspace. They are imported
+    # from the installed PECS runtime's `scripts` package. This ensures
+    # every workspace always executes the current runtime with no
+    # workspace-local copies that can go stale.
 
-    _write_managed_text_asset(
-        workspace_root,
-        bridge_dir / "export_workspace_continuity.py",
-        export_source.read_text(encoding="utf-8"),
-        backup_suffix="pecs-bridge-backup",
-    )
-    _write_managed_text_asset(
-        workspace_root,
-        bridge_dir / "validate_workspace_continuity.py",
-        validate_source.read_text(encoding="utf-8"),
-        backup_suffix="pecs-bridge-backup",
-    )
+    # WARNING: run_bridge.py is a THIN DELEGATE that always invokes the installed
+    # PECS CLI. It MUST NOT import from workspace-local copies of bridge scripts.
+    # All continuity logic lives in the installed PECS runtime's `scripts` package.
+    bridge_runner = """\"\"\"PECS workspace bridge — thin CLI delegate.
 
-    bridge_runner = """from __future__ import annotations
+Resolves the installed PECS runtime via install_root.json and delegates
+all operations to the installed ``pecs`` CLI. Never imports from
+workspace-local copies of bridge scripts.
+\"\"\"
 
 import argparse
-import json
+import subprocess
+import sys
 from pathlib import Path
 
-from export_workspace_continuity import export_workspace_continuity
-from validate_workspace_continuity import validate_workspace_continuity
+
+def _resolve_python() -> str:
+    \"\"\"Resolve installed Python from install_root.json.\"\"\"
+    config_path = Path(__file__).resolve().parent.parent / \"config\" / \"install_root.json\"
+    if config_path.exists():
+        try:
+            import json
+            data = json.loads(config_path.read_text(encoding=\"utf-8\"))
+            python_path = data.get(\"python_path\", \"\")
+            if python_path and Path(python_path).exists():
+                return python_path
+        except Exception:
+            pass
+    return sys.executable
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=\"Workspace-local PECS deterministic continuity bridge\"
+        description=\"PECS workspace bridge — delegates to installed PECS CLI\"
     )
     parser.add_argument(
         \"command\",
@@ -1039,28 +1065,21 @@ def main() -> None:
         default=None,
         help=\"Workspace root path.\",
     )
-
-    parser.add_argument(
-        "--validate-deps",
-        action="store_true",
-        help="Validate required Python dependencies and exit",
-    )
-    parser.add_argument(
-        "--health-check",
-        action="store_true",
-        help="Run installation health check and exit",
-    )
     args = parser.parse_args()
 
     workspace_value = args.workspace_flag or args.workspace_root or \".\"
     workspace_root = Path(workspace_value).resolve()
+    python_exe = _resolve_python()
 
-    if args.command == \"refresh\":
-        result = export_workspace_continuity(workspace_root)
-    else:
-        result = validate_workspace_continuity(workspace_root)
-
-    print(json.dumps(result, indent=2, sort_keys=True))
+    result = subprocess.run(
+        [python_exe, \"-m\", \"workspace_bridge_cli\", args.command, \"--workspace\", str(workspace_root)],
+        capture_output=True, text=True,
+    )
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    sys.exit(result.returncode)
 
 
 if __name__ == \"__main__\":
@@ -1743,6 +1762,31 @@ def _has_existing_workspace_assets(workspace_root: Path) -> bool:
     return any(path.exists() for path in markers)
 
 
+def _cleanup_stale_local_runtime_copy(workspace_root: Path) -> None:
+    stale_paths = [
+        workspace_root / ".pecs" / "pecs_pro",
+        workspace_root / ".pecs" / "pecs_pro.egg-info",
+        workspace_root / ".pecs" / "pecs_pro.dist-info",
+    ]
+    backup_dir = workspace_root / ".pecs" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for path in stale_paths:
+        if not path.exists():
+            continue
+        target_backup = backup_dir / f"stale_local_runtime_{path.name}_{timestamp}"
+        try:
+            if path.is_dir():
+                shutil.move(str(path), str(target_backup))
+            else:
+                shutil.copy2(str(path), str(target_backup))
+                path.unlink()
+        except Exception:
+            # Do not fail install because of cleanup; this is remediation only.
+            continue
+
+
 def install_workspace(workspace_root: Path, repo_root: Path, preserve_existing: bool = True) -> None:
     _ensure_global_runtime_registry(repo_root)
     _install_chat_tools(workspace_root, repo_root)
@@ -1760,6 +1804,7 @@ def install_workspace(workspace_root: Path, repo_root: Path, preserve_existing: 
     _install_consumer_guidance_assets(workspace_root, repo_root)
     _copy_manual_setup_guide(workspace_root, repo_root)
     _write_readme(workspace_root)
+    _cleanup_stale_local_runtime_copy(workspace_root)
     _write_workspace_install_root(workspace_root, repo_root)
     _install_workspace_local_launchers(workspace_root, repo_root)
     register_workspace(repo_root, workspace_root)

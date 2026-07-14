@@ -67,6 +67,39 @@ class CanonicalConsumerContractTests(unittest.TestCase):
             self.assertFalse(payload["consultation"]["enabled"])
             self.assertFalse(payload["consultation"]["query_issued"])
 
+    def test_consumer_specific_policy_override(self):
+        dummy = DummyTopologyRetriever()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace_root = Path(tmpdir)
+            config_path = workspace_root / ".pecs" / "config" / "consumer_consultation.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "pecs.consumer_consultation_config.v1",
+                        "global_enabled": True,
+                        "consumers": {
+                            "copilot": False,
+                            "continue": True,
+                            "commandcode": True,
+                            "kimi": True,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
 
-if __name__ == "__main__":
-    unittest.main()
+            copilot_payload = CopilotAdapter(dummy, workspace_root=workspace_root).build_copilot_context(
+                "test"
+            )
+            continue_payload = ContinueAdapter(dummy, workspace_root=workspace_root).build_continue_context(
+                "test"
+            )
+
+            self.assertFalse(copilot_payload["consultation"]["enabled"])
+            self.assertFalse(copilot_payload["consultation"]["query_issued"])
+            self.assertTrue(continue_payload["consultation"]["enabled"])
+            self.assertTrue(continue_payload["consultation"]["query_issued"])
+

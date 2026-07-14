@@ -419,6 +419,19 @@ class WorkspaceAssetsManager:
                     f"Workspace launcher exists but is not executable: {launcher_path}"
                 )
 
+        stale_runtime_paths = [
+            ".pecs/pecs_pro",
+            ".pecs/pecs_pro.egg-info",
+            ".pecs/pecs_pro.dist-info",
+        ]
+        for stale_path in stale_runtime_paths:
+            full_path = self.workspace_root / stale_path
+            if full_path.exists():
+                result["errors"].append(
+                    f"Stale workspace-local PECS runtime copy detected: {stale_path}"
+                )
+                result["valid"] = False
+
         tasks_path = self.workspace_root / ".vscode" / "tasks.json"
         if tasks_path.exists():
             task_data = tasks_path.read_text(encoding="utf-8")

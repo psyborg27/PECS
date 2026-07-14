@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -22,6 +23,11 @@ UPGRADE_OBSOLETE_PATHS = [
     ".pecs/daemon_lite_v2.pid",
     ".pecs/daemon_lite_v2_state.json",
     ".pecs/bridge/run_runtime_topology_build.py",
+    ".pecs/bridge/export_workspace_continuity.py",
+    ".pecs/bridge/validate_workspace_continuity.py",
+    ".pecs/pecs_pro",
+    ".pecs/pecs_pro.egg-info",
+    ".pecs/pecs_pro.dist-info",
     "docs/README_ALPHA1.md",
 ]
 
@@ -41,6 +47,9 @@ class WorkspaceUpgradePlan:
     managed_asset_status: Dict[str, str] = field(default_factory=dict)
     generated_artifact_status: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     consumer_config_present: Dict[str, bool] = field(default_factory=dict)
+    workspace_install_root: Optional[Path] = None
+    workspace_install_root_matches_repo_root: bool = False
+    stale_workspace_runtime_paths: List[str] = field(default_factory=list)
     legacy_artifacts: List[str] = field(default_factory=list)
     classified_artifacts: Dict[str, ManagedArtifactClassification] = field(default_factory=dict)
 
@@ -79,6 +88,9 @@ class UpgradeWorkspacePipeline:
 
         # Backup and deployment are performed together by the existing asset manager.
         install_result = self.manager.install_assets(upgrade=True, verify=False)
+        # Remove obsolete paths BEFORE install_workspace so removal is detected
+        # and reported (install_workspace also removes them but doesn't report).
+        report.removed_files = self._perform_obsolete_cleanup()
         install_workspace(self.workspace_root, self.repo_root, preserve_existing=True)
         report.rollback_location = str(self.workspace_root / ".pecs" / "backups")
         report.warnings.extend(install_result.get("warnings", []))
@@ -98,7 +110,6 @@ class UpgradeWorkspacePipeline:
         report.preserved_files = self._classified_files_by_type("PRESERVE")
         report.merged_files = self._classified_files_by_type("MERGE")
         report.replaced_files = self._classified_files_by_type("REPLACE")
-        report.removed_files = self._perform_obsolete_cleanup()
         report.elapsed_seconds = time.time() - started
         report.success = (
             validation_results.get("verify", False)
@@ -123,6 +134,13 @@ class UpgradeWorkspacePipeline:
         plan.managed_asset_status = self._detect_managed_asset_status()
         plan.generated_artifact_status = self._detect_generated_artifacts()
         plan.consumer_config_present = self._detect_consumer_configurations()
+        plan.workspace_install_root = self._read_workspace_install_root()
+        plan.workspace_install_root_matches_repo_root = (
+            plan.workspace_install_root == self.repo_root
+            if plan.workspace_install_root is not None
+            else False
+        )
+        plan.stale_workspace_runtime_paths = self._detect_stale_workspace_runtime_paths()
         plan.legacy_artifacts = self._detect_legacy_artifacts()
 
         return plan
@@ -291,6 +309,35 @@ class UpgradeWorkspacePipeline:
                 legacy.append(path_name)
         return legacy
 
+    def _read_workspace_install_root(self) -> Optional[Path]:
+        config_path = self.workspace_root / ".pecs" / "config" / "install_root.json"
+        if not config_path.exists():
+            return None
+
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        raw_root = str(payload.get("install_root", "") or "").strip()
+        if not raw_root:
+            return None
+
+        try:
+            return Path(raw_root).resolve()
+        except Exception:
+            return None
+
+    def _detect_stale_workspace_runtime_paths(self) -> List[str]:
+        stale: List[str] = []
+        for path_name in [".pecs/pecs_pro", ".pecs/pecs_pro.egg-info", ".pecs/pecs_pro.dist-info"]:
+            if (self.workspace_root / path_name).exists():
+                stale.append(path_name)
+        return stale
+
     def _run_workspace_bridge(self, command: str) -> Dict[str, Any]:
         bridge_script = self.workspace_root / ".pecs" / "bridge" / "run_bridge.py"
         if not bridge_script.exists():
@@ -433,20 +480,28 @@ class UpgradeWorkspacePipeline:
 
     def _perform_obsolete_cleanup(self) -> List[str]:
         removed: List[str] = []
+        from datetime import datetime
         for path_name in self.plan.legacy_artifacts if self.plan else []:
             target = self.workspace_root / path_name
             if not target.exists():
                 continue
+            # Backup before removal (mirrors install_workspace's _cleanup_stale_local_runtime_copy)
             try:
+                backup_dir = self.workspace_root / ".pecs" / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = backup_dir / f"stale_obsolete_{path_name.replace('/', '_')}_{timestamp}"
                 if target.is_dir():
-                    for child in sorted(target.rglob("*")):
-                        if child.is_file():
-                            child.unlink()
-                    target.rmdir()
+                    # Ignore .git to avoid socket files (fsmonitor--daemon.ipc) that break copytree
+                    shutil.copytree(target, backup_path, ignore=shutil.ignore_patterns(".git"))
+                    shutil.rmtree(target, ignore_errors=True)
                 else:
+                    shutil.copy2(target, backup_path)
                     target.unlink()
                 removed.append(path_name)
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error("Failed to remove obsolete path %s: %s", path_name, e)
                 continue
         return removed
 

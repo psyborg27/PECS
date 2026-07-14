@@ -1,7 +1,7 @@
 {
-  "schema": "pecs.workspace_assets_manifest.v1",
-  "version": "1.0.0",
-  "description": "PECS workspace assets manifest. Describes all assets to install into target workspaces.",
+  "schema": "pecs.workspace_assets_manifest.v2",
+  "version": "1.1.0",
+  "description": "PECS workspace assets manifest. Authoritative managed-asset policy for install and upgrade flows.",
   "assets": [
     {
       "id": "workspace_bootstrap",
@@ -10,7 +10,12 @@
       "merge_strategy": "create_if_missing",
       "required": true,
       "create_dirs": true,
-      "description": "Workspace bootstrap checkpoint"
+      "description": "Workspace bootstrap checkpoint",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "readme_workspace_preparation",
@@ -19,7 +24,12 @@
       "merge_strategy": "overwrite",
       "required": false,
       "create_dirs": true,
-      "description": "PECS workspace preparation guide"
+      "description": "PECS workspace preparation guide",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "overwrite",
+      "upgrade_behavior": "replace"
     },
     {
       "id": "copilot_instructions",
@@ -32,7 +42,12 @@
       "merge_options": {
         "preserve_existing_sections": true,
         "append_section_marker": "<!-- PECS-PRO -->"
-      }
+      },
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "append_or_merge",
+      "upgrade_behavior": "merge"
     },
     {
       "id": "continue_config",
@@ -43,10 +58,17 @@
       "create_dirs": true,
       "description": "Continue configuration with PECS rules",
       "merge_options": {
-        "key_paths": ["rules"],
+        "key_paths": [
+          "rules"
+        ],
         "merge_mode": "extend",
         "create_if_missing_top_level": true
-      }
+      },
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "merge_yaml",
+      "upgrade_behavior": "merge"
     },
     {
       "id": "pecs_first_routing_rule",
@@ -55,7 +77,12 @@
       "merge_strategy": "create_if_missing",
       "required": true,
       "create_dirs": true,
-      "description": "PECS-first routing rule for Continue"
+      "description": "PECS-first routing rule for Continue",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "pecs_context_rule",
@@ -64,7 +91,12 @@
       "merge_strategy": "create_if_missing",
       "required": true,
       "create_dirs": true,
-      "description": "PECS context guidance for Continue"
+      "description": "PECS context guidance for Continue",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "pecs_append_rule",
@@ -73,7 +105,12 @@
       "merge_strategy": "create_if_missing",
       "required": true,
       "create_dirs": true,
-      "description": "PECS chat append guidance for Continue"
+      "description": "PECS chat append guidance for Continue",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "continuity_map",
@@ -82,7 +119,12 @@
       "merge_strategy": "create_if_missing",
       "required": false,
       "create_dirs": true,
-      "description": "Continuity map placeholder for live convergence tracking"
+      "description": "Continuity map placeholder for live convergence tracking",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "pecs_coding_protocol",
@@ -91,7 +133,12 @@
       "merge_strategy": "create_if_missing",
       "required": false,
       "create_dirs": true,
-      "description": "PECS coding protocol guidance for Continue"
+      "description": "PECS coding protocol guidance for Continue",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "pecs_prompt",
@@ -100,7 +147,12 @@
       "merge_strategy": "create_if_missing",
       "required": false,
       "create_dirs": true,
-      "description": "PECS prompt authority guidance for Continue"
+      "description": "PECS prompt authority guidance for Continue",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "live_context",
@@ -109,7 +161,12 @@
       "merge_strategy": "create_if_missing",
       "required": false,
       "create_dirs": true,
-      "description": "Live context guidance for PECS middleware"
+      "description": "Live context guidance for PECS middleware",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "pecs_readme",
@@ -118,7 +175,12 @@
       "merge_strategy": "overwrite",
       "required": true,
       "create_dirs": true,
-      "description": "PECS workspace integration README"
+      "description": "PECS workspace integration README",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "overwrite",
+      "upgrade_behavior": "replace"
     },
     {
       "id": "pecs_consumer_protocol",
@@ -127,7 +189,26 @@
       "merge_strategy": "create_if_missing",
       "required": true,
       "create_dirs": true,
-      "description": "Shared canonical PECS consumer protocol"
+      "description": "Shared canonical PECS consumer protocol",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
+    },
+    {
+      "id": "consumer_consultation_policy",
+      "source": ".pecs/config/consumer_consultation.json",
+      "target": ".pecs/config/consumer_consultation.json",
+      "merge_strategy": "create_if_missing",
+      "required": true,
+      "create_dirs": true,
+      "description": "Workspace-level consultation policy override for all consumers",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "kimi_instructions",
@@ -136,7 +217,12 @@
       "merge_strategy": "create_if_missing",
       "required": true,
       "create_dirs": true,
-      "description": "Minimal Kimi consumer guidance referencing the shared PECS protocol"
+      "description": "Minimal Kimi consumer guidance referencing the shared PECS protocol",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "commandcode_instructions",
@@ -145,7 +231,12 @@
       "merge_strategy": "create_if_missing",
       "required": true,
       "create_dirs": true,
-      "description": "Minimal Command Code consumer guidance referencing the shared PECS protocol"
+      "description": "Minimal Command Code consumer guidance referencing the shared PECS protocol",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "create_if_missing",
+      "upgrade_behavior": "preserve_if_present"
     },
     {
       "id": "readme_workspace_integration",
@@ -154,7 +245,12 @@
       "merge_strategy": "overwrite",
       "required": true,
       "create_dirs": true,
-      "description": "Workspace integration installation README"
+      "description": "Workspace integration installation README",
+      "asset_version": "1.0.0",
+      "ownership": "pecs_pro",
+      "replacement_policy": "manifest_controlled",
+      "merge_policy": "overwrite",
+      "upgrade_behavior": "replace"
     }
   ],
   "merge_strategies": {
@@ -203,6 +299,7 @@
       ".pecs/WORKSPACE_BOOTSTRAP.md",
       ".pecs/README.md",
       ".pecs/PECS_CONSUMER_PROTOCOL.md",
+      ".pecs/config/consumer_consultation.json",
       ".pecs/tools/append_ai_chat_history.py",
       ".pecs/bridge/run_bridge.py",
       ".github/copilot-instructions.md",

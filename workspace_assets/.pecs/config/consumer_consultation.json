@@ -1,0 +1,11 @@
+{
+  "schema": "pecs.consumer_consultation_config.v1",
+  "global_enabled": true,
+  "consumers": {
+    "continue": true,
+    "copilot": true,
+    "commandcode": true,
+    "kimi": true
+  },
+  "notes": "Workspace-level consultation policy override for PECS consumer adapters."
+}

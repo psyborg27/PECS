@@ -538,6 +538,18 @@ def _load_health_state(workspace_root: Path) -> Dict[str, object]:
     return _load_json(workspace_root / ".pecs" / "daemon_health.json", {})
 
 
+def _load_daemon_state(workspace_root: Path) -> Dict[str, object]:
+    return _load_json(workspace_root / ".pecs" / "daemon_state.json", {})
+
+
+def _load_daemon_cycle_validation(workspace_root: Path) -> Dict[str, object]:
+    return _load_json(workspace_root / ".pecs" / "daemon_cycle_validation.json", {})
+
+
+def _load_validation_report(workspace_root: Path, name: str) -> Dict[str, object]:
+    return _load_json(workspace_root / ".pecs" / name, {})
+
+
 def _format_health_summary(health_state: Dict[str, object]) -> str:
     lines = []
     lines.append(f"  Daemon version: {health_state.get('daemon_version', 'unknown')}")
@@ -562,6 +574,16 @@ def _setup_logging(verbose: bool) -> None:
         level=level,
         format="%(levelname)s: %(message)s",
     )
+
+
+def _run_canonical_verification_or_exit(workspace_root: Path, repo_root: Path) -> None:
+    from validation.canonical_workspace_validator import run_canonical_workspace_validation
+
+    report = run_canonical_workspace_validation(workspace_root, repo_root)
+    if not bool(report.get("valid", False)):
+        logger.error("Canonical workspace verification failed")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        sys.exit(1)
 
 
 def _cmd_init(args: argparse.Namespace) -> None:
@@ -629,6 +651,7 @@ def _cmd_install_workspace_assets(args: argparse.Namespace) -> None:
             for error in verification.get("errors", []):
                 logger.error(f"  - {error}")
             sys.exit(1)
+        _run_canonical_verification_or_exit(workspace_root, repo_root)
 
         _append_lifecycle_record(
             workspace_root,
@@ -707,6 +730,7 @@ def _cmd_bootstrap_workspace(args: argparse.Namespace) -> None:
             for error in verification.get("errors", []):
                 logger.error(f"  - {error}")
             sys.exit(1)
+        _run_canonical_verification_or_exit(workspace_root, repo_root)
 
         _append_lifecycle_record(
             workspace_root,
@@ -804,6 +828,7 @@ def _cmd_rebind_workspace(args: argparse.Namespace) -> None:
             for error in verification.get("errors", []):
                 logger.error(f"  - {error}")
             sys.exit(1)
+        _run_canonical_verification_or_exit(workspace_root, repo_root)
 
         _run_workspace_bridge(workspace_root, "refresh")
         _append_lifecycle_record(
@@ -1035,9 +1060,45 @@ def _cmd_status(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         daemon_pid_file = workspace_root / ".pecs" / "daemon.pid"
+        daemon_state = _load_daemon_state(workspace_root)
         health_state = _load_health_state(workspace_root)
+        cycle_validation = _load_daemon_cycle_validation(workspace_root)
+        graph_validation = _load_validation_report(
+            workspace_root, "workspace_graph_validation.json"
+        )
+        registry_validation = _load_validation_report(
+            workspace_root, "workspace_registry_validation.json"
+        )
 
         logger.info(f"Workspace: {workspace_root}")
+        logger.info(
+            "Runtime locality payload count: %s",
+            daemon_state.get("runtime_locality_payload_count", 0),
+        )
+        logger.info(
+            "Runtime reachable count: %s",
+            daemon_state.get("runtime_reachable_count", 0),
+        )
+        logger.info(
+            "Topology edge count: %s",
+            daemon_state.get("topology_edge_count", 0),
+        )
+        logger.info(
+            "Daemon health: %s",
+            health_state.get("status", "unknown"),
+        )
+        logger.info(
+            "Workspace graph health: %s",
+            "healthy" if graph_validation.get("valid", False) else "unhealthy",
+        )
+        logger.info(
+            "Workspace registry health: %s",
+            "healthy" if registry_validation.get("valid", False) else "unhealthy",
+        )
+        if cycle_validation:
+            logger.info("Cycle validation: present")
+        else:
+            logger.info("Cycle validation: missing")
 
         if not daemon_pid_file.exists():
             logger.info("Daemon: NOT RUNNING (no PID file)")
@@ -1142,25 +1203,41 @@ def _cmd_refresh_workspace(args: argparse.Namespace) -> None:
 
 
 def _cmd_validate_workspace(args: argparse.Namespace) -> None:
-    """Validate continuity state using the workspace bridge."""
+    """Validate workspace state using the canonical Alpha 1 validator."""
     workspace_root = Path(args.workspace_root).resolve()
+    repo_root = (
+        Path(args.repo_root).resolve()
+        if args.repo_root
+        else Path(__file__).resolve().parent
+    )
 
     if not workspace_root.exists():
         logger.error(f"Workspace does not exist: {workspace_root}")
         sys.exit(1)
 
     try:
+        from validation.canonical_workspace_validator import (
+            run_canonical_workspace_validation,
+        )
+
         _append_lifecycle_record(
             workspace_root,
             "validate_workspace_started",
             {"workspace_root": str(workspace_root)},
         )
-        _run_workspace_bridge(workspace_root, "validate")
+        report = run_canonical_workspace_validation(workspace_root, repo_root)
+        print(json.dumps(report, indent=2, sort_keys=True))
         _append_lifecycle_record(
             workspace_root,
             "validate_workspace_completed",
-            {"workspace_root": str(workspace_root)},
+            {
+                "workspace_root": str(workspace_root),
+                "valid": bool(report.get("valid", False)),
+            },
         )
+        if not bool(report.get("valid", False)):
+            logger.error(f"Continuity validation failed: {workspace_root}")
+            sys.exit(1)
         logger.info(f"Continuity validation completed: {workspace_root}")
     except Exception as e:
         _append_lifecycle_record(
@@ -1566,71 +1643,59 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
                 "editable install recovery may require activating .venv"
             )
 
-        # Continuity health checks
-        logger.info("\nContinuity Health:")
-        active_context = _load_json(
-            workspace_root / ".pecs" / "active_context.json", {}
+        # Runtime authority checks
+        logger.info("\nRuntime Authority Health:")
+        daemon_state = _load_daemon_state(workspace_root)
+        cycle_validation = _load_daemon_cycle_validation(workspace_root)
+        graph_validation = _load_validation_report(
+            workspace_root, "workspace_graph_validation.json"
         )
-        locality_state = _load_json(
-            workspace_root / ".pecs" / "locality_index.json", {}
-        )
-        continuity_topology = _load_json(
-            workspace_root / ".pecs" / "continuity" / "active_topology.json", {}
-        )
-        continuity_locality_state = _load_json(
-            workspace_root / ".pecs" / "continuity" / "locality_state.json", {}
+        registry_validation = _load_validation_report(
+            workspace_root, "workspace_registry_validation.json"
         )
 
-        active_size = (
-            len(active_context.get("activated_objects", []))
-            if isinstance(active_context, dict)
-            else 0
+        logger.info(
+            "  Runtime locality payload count: %s",
+            daemon_state.get("runtime_locality_payload_count", 0),
         )
-        cluster_count = (
-            len(continuity_locality_state.get("active_locality_clusters", []))
-            if isinstance(continuity_locality_state, dict)
-            else 0
+        logger.info(
+            "  Runtime reachable count: %s",
+            daemon_state.get("runtime_reachable_count", 0),
         )
-        touched_count = (
-            len(continuity_locality_state.get("active_runtime_touched_files", []))
-            if isinstance(continuity_locality_state, dict)
-            else 0
+        logger.info(
+            "  Topology edge count: %s",
+            daemon_state.get("topology_edge_count", 0),
         )
-        confirmation = float(
-            continuity_topology.get("runtime_validation", {}).get(
-                "runtime_confirmation_density", 0.0
+        logger.info(
+            "  Daemon health: %s",
+            health_state.get("status", "unknown"),
+        )
+        logger.info(
+            "  Workspace graph health: %s",
+            "healthy" if graph_validation.get("valid", False) else "unhealthy",
+        )
+        logger.info(
+            "  Workspace registry health: %s",
+            "healthy" if registry_validation.get("valid", False) else "unhealthy",
+        )
+        logger.info(
+            "  Cycle validation present: %s",
+            bool(cycle_validation),
+        )
+
+        logger.info("\nCanonical Validation:")
+        try:
+            from validation.canonical_workspace_validator import (
+                run_canonical_workspace_validation,
             )
-            if isinstance(continuity_topology, dict)
-            else 0.0
-        )
 
-        logger.info(f"  Active context objects: {active_size}")
-        logger.info(f"  Active locality clusters: {cluster_count}")
-        logger.info(f"  Active runtime touched files: {touched_count}")
-        logger.info(f"  Runtime confirmation density: {confirmation:.3f}")
-
-        projection_path = workspace_root / ".pecs" / "pecs_lite_runtime_projection.json"
-        if projection_path.exists():
-            projection = _load_json(projection_path, {})
-            runtime_targets = projection.get("runtime_targets", [])
-            wrapper_warning = projection.get("wrapper_warning")
-            authority_violation = any(
-                str(path).startswith(".pecs/")
-                for path in runtime_targets
-                if isinstance(path, str)
-            )
-            logger.info("\nPECS-LITE Projection:")
-            logger.info(f"  ✓ Projection file found: {projection_path}")
-            logger.info(f"  Runtime targets: {len(runtime_targets)}")
-            logger.info(f"  Wrapper warning: {wrapper_warning}")
+            canonical = run_canonical_workspace_validation(workspace_root, repo_root)
             logger.info(
-                f"  Authority violation: {'YES' if authority_violation else 'NO'}"
+                "  Canonical validation: %s",
+                "PASSED" if canonical.get("valid", False) else "FAILED",
             )
-        else:
-            logger.info("\nPECS-LITE Projection:")
-            logger.info(
-                "  · PECS-LITE projections are generated on demand via the query pipeline; no persistent .pecs/pecs_lite_runtime_projection.json file is required for healthy operation."
-            )
+        except Exception as exc:
+            logger.info("  Canonical validation unavailable: %s", exc)
 
         logger.info("\n" + "=" * 60)
 

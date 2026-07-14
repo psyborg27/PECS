@@ -36,9 +36,33 @@ class WorkspaceAssetsManager:
                 f"Workspace assets manifest not found: {self.manifest_path}"
             )
         self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        self._validate_manifest_policy_fields()
         logger.info(
             f"Loaded workspace assets manifest (v{self.manifest.get('version', '?')})"
         )
+
+    def _validate_manifest_policy_fields(self) -> None:
+        required_fields = {
+            "asset_version",
+            "ownership",
+            "replacement_policy",
+            "merge_policy",
+            "upgrade_behavior",
+        }
+        missing_by_asset: Dict[str, List[str]] = {}
+        for asset in self.manifest.get("assets", []):
+            asset_id = str(asset.get("id", "unknown"))
+            missing = sorted(
+                field for field in required_fields if field not in asset
+            )
+            if missing:
+                missing_by_asset[asset_id] = missing
+
+        if missing_by_asset:
+            raise ValueError(
+                "Workspace asset manifest missing required policy fields: "
+                + json.dumps(missing_by_asset, sort_keys=True)
+            )
 
     def install_assets(
         self, upgrade: bool = False, verify: bool = True

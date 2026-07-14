@@ -8,7 +8,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from pecs_pro.install_workspace_integration import install_workspace
 from pecs_pro.workspace_assets_manager import WorkspaceAssetsManager
+from validation.canonical_workspace_validator import run_canonical_workspace_validation
 
 UPGRADE_OBSOLETE_PATHS = [
     "pecs_lite",
@@ -16,6 +18,11 @@ UPGRADE_OBSOLETE_PATHS = [
     "runtime_observability_daemon",
     "runtime_observability_daemon.py",
     "start_pecs_daemon.sh",
+    ".pecs/pecs_lite_runtime_projection.json",
+    ".pecs/daemon_lite_v2.pid",
+    ".pecs/daemon_lite_v2_state.json",
+    ".pecs/bridge/run_runtime_topology_build.py",
+    "docs/README_ALPHA1.md",
 ]
 
 ManagedArtifactClassification = str
@@ -49,6 +56,7 @@ class UpgradeReport:
     removed_files: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     validation_results: Dict[str, Any] = field(default_factory=dict)
+    canonical_verification: Dict[str, Any] = field(default_factory=dict)
     rollback_location: Optional[str] = None
     elapsed_seconds: float = 0.0
     success: bool = False
@@ -71,6 +79,7 @@ class UpgradeWorkspacePipeline:
 
         # Backup and deployment are performed together by the existing asset manager.
         install_result = self.manager.install_assets(upgrade=True, verify=False)
+        install_workspace(self.workspace_root, self.repo_root, preserve_existing=True)
         report.rollback_location = str(self.workspace_root / ".pecs" / "backups")
         report.warnings.extend(install_result.get("warnings", []))
 
@@ -83,6 +92,7 @@ class UpgradeWorkspacePipeline:
 
         validation_results = self.validate_workspace_installation()
         report.validation_results = validation_results
+        report.canonical_verification = self._run_canonical_verification()
 
         report.after_versions = self._reload_versions()
         report.preserved_files = self._classified_files_by_type("PRESERVE")
@@ -90,7 +100,11 @@ class UpgradeWorkspacePipeline:
         report.replaced_files = self._classified_files_by_type("REPLACE")
         report.removed_files = self._perform_obsolete_cleanup()
         report.elapsed_seconds = time.time() - started
-        report.success = validation_results.get("verify", False) and validation_results.get("validate", False) and validation_results.get("doctor", False)
+        report.success = (
+            validation_results.get("verify", False)
+            and validation_results.get("doctor", False)
+            and bool(report.canonical_verification.get("valid", False))
+        )
         self.report = report
         return report
 
@@ -152,9 +166,16 @@ class UpgradeWorkspacePipeline:
     def validate_workspace_installation(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {}
         results["verify"] = self._run_verify_workspace()
-        results["validate"] = self._run_validate_workspace()
         results["doctor"] = self._run_doctor()
+        results["legacy_validate"] = self._run_validate_workspace()
+        results["canonical"] = bool(
+            self._run_canonical_verification().get("valid", False)
+        )
+        results["validate"] = results["canonical"]
         return results
+
+    def _run_canonical_verification(self) -> Dict[str, Any]:
+        return run_canonical_workspace_validation(self.workspace_root, self.repo_root)
 
     def _capture_deployment_report(self, report: UpgradeReport, plan: WorkspaceUpgradePlan) -> None:
         report.warnings.extend(plan.workspace_health.get("warnings", []))

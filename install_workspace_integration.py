@@ -1902,6 +1902,16 @@ def main() -> None:
         )
         logger.info("Legacy installation completed")
 
+        from validation.canonical_workspace_validator import (
+            run_canonical_workspace_validation,
+        )
+
+        canonical_report = run_canonical_workspace_validation(workspace_root, repo_root)
+        if not bool(canonical_report.get("valid", False)):
+            logger.error("Canonical Alpha 1 verification failed after installation")
+            print(json.dumps(canonical_report, indent=2, sort_keys=True))
+            sys.exit(1)
+
         logger.info(
             f"PECS workspace integration successfully installed at: {workspace_root}"
         )

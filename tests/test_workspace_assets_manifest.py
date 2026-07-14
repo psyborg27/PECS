@@ -23,6 +23,23 @@ class WorkspaceAssetsManifestTests(unittest.TestCase):
             f"Workspace asset manifest contains missing source files: {missing_sources}",
         )
 
+    def test_manifest_assets_define_policy_metadata(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        manager = WorkspaceAssetsManager(repo_root, repo_root)
+        required = {
+            "asset_version",
+            "ownership",
+            "replacement_policy",
+            "merge_policy",
+            "upgrade_behavior",
+        }
+        missing = {}
+        for asset in manager.manifest.get("assets", []):
+            absent = sorted(field for field in required if field not in asset)
+            if absent:
+                missing[asset.get("id", "unknown")] = absent
+        self.assertEqual(missing, {}, f"Asset policy metadata missing: {missing}")
+
     def test_consumer_guidance_assets_install_and_verify(self):
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -35,6 +52,7 @@ class WorkspaceAssetsManifestTests(unittest.TestCase):
 
             expected_paths = [
                 workspace_root / ".pecs" / "PECS_CONSUMER_PROTOCOL.md",
+                workspace_root / ".pecs" / "config" / "consumer_consultation.json",
                 workspace_root / ".kimi" / "instructions.md",
                 workspace_root / ".commandcode" / "instructions.md",
             ]

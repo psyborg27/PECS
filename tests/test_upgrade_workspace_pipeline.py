@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pecs_pro.upgrade_workspace_pipeline as upgrade_module
 from pecs_pro.upgrade_workspace_pipeline import UpgradeWorkspacePipeline
 
 
@@ -51,6 +52,8 @@ class UpgradeWorkspacePipelineTests(unittest.TestCase):
             pipeline._run_verify_workspace = lambda: True
             pipeline._run_validate_workspace = lambda: True
             pipeline._run_doctor = lambda: True
+            pipeline._run_canonical_verification = lambda: {"valid": True}
+            upgrade_module.install_workspace = lambda *args, **kwargs: None
 
             report = pipeline.run()
 

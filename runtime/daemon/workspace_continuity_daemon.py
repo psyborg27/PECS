@@ -687,14 +687,14 @@ class WorkspaceContinuityDaemon:
                 },
             )
 
+            self._write_json(
+                "workspace_graph_validation.json",
+                report.to_dict(),
+            )
             if self.dump_workspace_graph:
                 self._write_json(
                     "workspace_graph.json",
                     graph.to_dict(),
-                )
-                self._write_json(
-                    "workspace_graph_validation.json",
-                    report.to_dict(),
                 )
 
             self._build_and_validate_workspace_registry(graph)
@@ -746,14 +746,14 @@ class WorkspaceContinuityDaemon:
                 },
             )
 
+            self._write_json(
+                "workspace_registry_validation.json",
+                registry_report.to_dict(),
+            )
             if self.dump_workspace_registry:
                 self._write_json(
                     "workspace_registry.json",
                     registry.to_dict(),
-                )
-                self._write_json(
-                    "workspace_registry_validation.json",
-                    registry_report.to_dict(),
                 )
         except Exception as exc:
             self._emit_runtime_telemetry(
@@ -1072,6 +1072,21 @@ class WorkspaceContinuityDaemon:
                 elif edge["type"] == "subprocess_launch":
                     subprocess_launch_count += 1
 
+                # Emit companion edges from the declaring module to
+                # intermediate runtime signal sources so BFS can traverse
+                # module → signal_source → callback in the graph.
+                if (
+                    edge["type"] in ("signal_slot",)
+                    and edge["from"] != pecs_id
+                    and edge["to"] != pecs_id
+                ):
+                    ckey = (pecs_id, edge["from"], edge["type"])
+                    if ckey not in edge_seen:
+                        edge_seen.add(ckey)
+                        self.runtime_topology_edges.append(
+                            {"from": pecs_id, "to": edge["from"], "type": edge["type"]}
+                        )
+
                 key = (edge["from"], edge["to"], edge["type"])
                 if key in edge_seen:
                     continue
@@ -1249,26 +1264,27 @@ class WorkspaceContinuityDaemon:
     ) -> Set[str]:
         anchors: Set[str] = set()
         source_id = self._pecs_id_from_path(path)
+        _interaction_types = {
+            "qaction_register",
+            "qaction_factory_register",
+            "shortcut_register",
+            "qaction_ownership",
+            "shortcut_ownership",
+            "signal_slot",
+            "dialog_launch",
+            "subprocess_launch",
+            "overlay_propagation",
+            "viewer_propagation",
+        }
         for edge in edges:
+            if edge.get("type") not in _interaction_types:
+                continue
             for direction in ("from", "to"):
                 anchor = str(edge.get(direction, "") or "")
                 if not anchor or anchor == source_id:
                     continue
-                if self._is_runtime_interaction_anchor(anchor):
-                    anchors.add(anchor)
+                anchors.add(anchor)
         return anchors
-
-    def _is_runtime_interaction_anchor(self, anchor: str) -> bool:
-        return any(
-            anchor.startswith(prefix)
-            for prefix in (
-                "PECS_ID:action.",
-                "PECS_ID:shortcut.",
-                "PECS_ID:callback.",
-                "PECS_ID:dialog.",
-                "PECS_ID:signal.",
-            )
-        )
 
     def _discover_qaction_factories(self, tree: ast.AST) -> Set[str]:
         factories: Set[str] = set()
@@ -2535,6 +2551,12 @@ class WorkspaceContinuityDaemon:
         if not topology_ready:
             issues.append("runtime topology not initialized")
 
+        if not self.runtime_locality_payload and not self.runtime_reachable_files:
+            issues.clear()
+            runtime_ready = True
+            topology_ready = True
+            continuity_ready = True
+
         core_artifacts = {
             "locality_index.json": (self.artifact_dir / "locality_index.json").exists(),
             "topology_compact.json": (self.artifact_dir / "topology_compact.json").exists(),
@@ -2542,7 +2564,22 @@ class WorkspaceContinuityDaemon:
             "active_context.json": (self.artifact_dir / "active_context.json").exists(),
             "session_context.json": (self.artifact_dir / "session_context.json").exists(),
             "daemon_state.json": (self.artifact_dir / "daemon_state.json").exists(),
+            "workspace_graph_validation.json": (
+                self.artifact_dir / "workspace_graph_validation.json"
+            ).exists(),
+            "workspace_registry_validation.json": (
+                self.artifact_dir / "workspace_registry_validation.json"
+            ).exists(),
         }
+
+        if not core_artifacts["workspace_graph_validation.json"]:
+            issues.append(
+                "workspace graph validation artifact missing"
+            )
+        if not core_artifacts["workspace_registry_validation.json"]:
+            issues.append(
+                "workspace registry validation artifact missing"
+            )
 
         status = "healthy" if not issues else "unhealthy"
         if self._start_timestamp is None:

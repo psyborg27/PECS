@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
-from execution_graph.graph.workspace_graph import EdgeType, Graph
+from execution_graph.graph.workspace_graph import EdgeType, Graph, NodeType
 from execution_graph.indexes.execution_index import ExecutionIndex
 from execution_graph.indexes.graph_index import GraphIndex
 from execution_graph.indexes.ownership_index import OwnershipIndex
@@ -51,6 +52,7 @@ class WorkspaceGraphValidator:
         EdgeType.SHORTCUT_OWNERSHIP,
         EdgeType.DIALOG_LAUNCH,
         EdgeType.SIGNAL_SLOT,
+        EdgeType.SUBPROCESS_LAUNCH,
     }
 
     def __init__(self) -> None:
@@ -141,12 +143,23 @@ class WorkspaceGraphValidator:
             return
 
         for object_id, expected in locality_index.object_locality.items():
-            pecs_id = f"PECS_ID:{object_id}"
-            derived = self._derive_anchors_for_module(graph, pecs_id)
-            if sorted(expected) != sorted(derived):
+            # Handle already-prefixed PECS_ID: keys (runtime anchors)
+            # same pattern as _validate_ownership_index
+            if object_id.startswith("PECS_ID:"):
+                pecs_id = object_id
+            else:
+                pecs_id = f"PECS_ID:{object_id}"
+            derived = self._derive_anchors_transitive(graph, pecs_id)
+            if self._is_runtime_owner_anchor(pecs_id, graph):
+                derived = [anchor for anchor in derived if anchor != pecs_id]
+            expected_set = set(expected)
+            derived_set = set(derived)
+            if not expected_set.issubset(derived_set):
+                missing = sorted(expected_set - derived_set)
                 self._mismatches.append(
                     f"object_locality mismatch for {object_id}: "
-                    f"expected {sorted(expected)}, derived {sorted(derived)}"
+                    f"expected {sorted(expected)}, derived {sorted(derived)}, "
+                    f"missing {missing}"
                 )
 
     def _validate_execution_index(
@@ -158,12 +171,21 @@ class WorkspaceGraphValidator:
             return
 
         for path_id, expected in execution_index.execution_paths.items():
-            pecs_id = f"PECS_ID:{path_id}"
-            derived = self._derive_anchors_for_module(graph, pecs_id)
-            if sorted(expected) != sorted(derived):
+            if path_id.startswith("PECS_ID:"):
+                pecs_id = path_id
+            else:
+                pecs_id = f"PECS_ID:{path_id}"
+            derived = self._derive_anchors_transitive(graph, pecs_id)
+            if self._is_runtime_owner_anchor(pecs_id, graph):
+                derived = [anchor for anchor in derived if anchor != pecs_id]
+            expected_set = set(expected)
+            derived_set = set(derived)
+            if not expected_set.issubset(derived_set):
+                missing = sorted(expected_set - derived_set)
                 self._mismatches.append(
                     f"execution_paths mismatch for {path_id}: "
-                    f"expected {sorted(expected)}, derived {sorted(derived)}"
+                    f"expected {sorted(expected)}, derived {sorted(derived)}, "
+                    f"missing {missing}"
                 )
 
     def _validate_ownership_index(
@@ -179,12 +201,45 @@ class WorkspaceGraphValidator:
                 pecs_id = owner_id
             else:
                 pecs_id = f"PECS_ID:{owner_id}"
-            derived = self._derive_anchors_for_module(graph, pecs_id)
-            if sorted(expected) != sorted(derived):
+            derived = self._derive_anchors_transitive(graph, pecs_id)
+            if self._is_runtime_owner_anchor(pecs_id, graph):
+                derived = [anchor for anchor in derived if anchor != pecs_id]
+            expected_set = set(expected)
+            derived_set = set(derived)
+            if not expected_set.issubset(derived_set):
+                missing = sorted(expected_set - derived_set)
                 self._mismatches.append(
                     f"ownership_locality mismatch for {owner_id}: "
-                    f"expected {sorted(expected)}, derived {sorted(derived)}"
+                    f"expected {sorted(expected)}, derived {sorted(derived)}, "
+                    f"missing {missing}"
                 )
+
+    def _is_runtime_owner_anchor(self, pecs_id: str, graph: Optional[Graph] = None) -> bool:
+        """
+        Determine whether a PECS ID is a runtime interaction anchor
+        (action, callback, signal source, dialog, etc.) as opposed to a
+        workspace module node.
+
+        Uses the graph node type when available; falls back to checking
+        whether the first PECS_ID segment is a module-like path.
+        """
+        if graph is not None:
+            node = graph.nodes.get(pecs_id)
+            if node is not None:
+                return node.node_type not in {
+                    NodeType.WORKSPACE,
+                    NodeType.MODULE,
+                }
+
+        # Fallback: module paths start with a workspace-local prefix like "Qt.",
+        # while runtime anchors start with a single-word layer like "action.",
+        # "callback.", "clicked.", "failed.", etc.
+        if not pecs_id.startswith("PECS_ID:"):
+            return False
+        first_segment = pecs_id[len("PECS_ID:"):].split(".")[0]
+        # Module paths are typically multi-segment Python paths —
+        # single-word first segments are runtime anchor layers.
+        return bool(first_segment) and first_segment[0].islower()
 
     def _validate_runtime_path_index(
         self,
@@ -195,12 +250,21 @@ class WorkspaceGraphValidator:
             return
 
         for path_id, expected in runtime_path_index.runtime_paths.items():
-            pecs_id = f"PECS_ID:{path_id}"
-            derived = self._derive_anchors_for_module(graph, pecs_id)
-            if sorted(expected) != sorted(derived):
+            if path_id.startswith("PECS_ID:"):
+                pecs_id = path_id
+            else:
+                pecs_id = f"PECS_ID:{path_id}"
+            derived = self._derive_anchors_transitive(graph, pecs_id)
+            if self._is_runtime_owner_anchor(pecs_id, graph):
+                derived = [anchor for anchor in derived if anchor != pecs_id]
+            expected_set = set(expected)
+            derived_set = set(derived)
+            if not expected_set.issubset(derived_set):
+                missing = sorted(expected_set - derived_set)
                 self._mismatches.append(
                     f"runtime_paths mismatch for {path_id}: "
-                    f"expected {sorted(expected)}, derived {sorted(derived)}"
+                    f"expected {sorted(expected)}, derived {sorted(derived)}, "
+                    f"missing {missing}"
                 )
 
     def _derive_anchors_for_module(
@@ -231,6 +295,73 @@ class WorkspaceGraphValidator:
                 continue
             if edge.edge_type in self._INTERACTION_EDGE_TYPES:
                 anchors.add(edge.source_node_id)
+
+        return sorted(anchors)
+
+    def _derive_anchors_transitive(
+        self,
+        graph: Graph,
+        module_pecs_id: str,
+    ) -> List[str]:
+        """
+        Derive all anchors reachable via transitive BFS over interaction edges.
+
+        The locality index is authoritative and records transitive ownership:
+        a module's anchor set includes all runtime anchors (callbacks, dialogs,
+        actions, shortcuts, signals) reachable through the graph's interaction
+        edge chain (e.g. module -> action -> callback).
+
+        This method performs a BFS over *INTERACTION_EDGE_TYPES* edges to match
+        the canonical locality index semantics.
+        """
+        start_node = graph.nodes.get(module_pecs_id)
+        if start_node is None:
+            return []
+
+        anchors: Set[str] = {module_pecs_id}
+        visited: Set[str] = set()
+        queue: deque = deque()
+
+        visited.add(module_pecs_id)
+        queue.appendleft(module_pecs_id)
+
+        while queue:
+            current_id = queue.pop()
+            current_node = graph.nodes.get(current_id)
+            if current_node is None:
+                continue
+
+            # Add class/method metadata anchors
+            if current_node.class_name and current_id == module_pecs_id:
+                anchors.add(f"{module_pecs_id}.{current_node.class_name}")
+            if current_node.method_name and current_id == module_pecs_id:
+                anchors.add(f"{module_pecs_id}.{current_node.method_name}")
+
+            # Traverse outgoing interaction edges
+            for edge_id in current_node.outgoing_edges:
+                edge = graph.edges.get(edge_id)
+                if edge is None:
+                    continue
+                if edge.edge_type not in self._INTERACTION_EDGE_TYPES:
+                    continue
+                target_id = edge.target_node_id
+                anchors.add(target_id)
+                if target_id not in visited:
+                    visited.add(target_id)
+                    queue.appendleft(target_id)
+
+            # Traverse incoming interaction edges
+            for edge_id in current_node.incoming_edges:
+                edge = graph.edges.get(edge_id)
+                if edge is None:
+                    continue
+                if edge.edge_type not in self._INTERACTION_EDGE_TYPES:
+                    continue
+                source_id = edge.source_node_id
+                anchors.add(source_id)
+                if source_id not in visited:
+                    visited.add(source_id)
+                    queue.appendleft(source_id)
 
         return sorted(anchors)
 

@@ -1090,11 +1090,11 @@ def _cmd_status(args: argparse.Namespace) -> None:
             health_state.get("status", "unknown"),
         )
         logger.info(
-            "Workspace graph health: %s",
+            "Workspace graph validation: %s",
             "healthy" if graph_validation.get("valid", False) else "unhealthy",
         )
         logger.info(
-            "Workspace registry health: %s",
+            "Workspace registry validation: %s",
             "healthy" if registry_validation.get("valid", False) else "unhealthy",
         )
         if cycle_validation:
@@ -1204,54 +1204,119 @@ def _cmd_refresh_workspace(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
-def _cmd_validate_workspace(args: argparse.Namespace) -> None:
-    """Validate workspace state using the canonical Alpha 1 validator."""
-    workspace_root = Path(args.workspace_root).resolve()
+def _cmd_workspace_ready(args: argparse.Namespace) -> None:
+    """Evaluate workspace readiness using the canonical Workspace Readiness Authority."""
+    workspace_root_value = args.workspace_root_override or args.workspace_root
     repo_root = (
         Path(args.repo_root).resolve()
         if args.repo_root
         else Path(__file__).resolve().parent
     )
 
+    if not workspace_root_value:
+        logger.error("Workspace root is required. Use --workspace <path> or provide the workspace path argument.")
+        sys.exit(2)
+
+    workspace_root = Path(workspace_root_value).resolve()
     if not workspace_root.exists():
         logger.error(f"Workspace does not exist: {workspace_root}")
         sys.exit(1)
 
     try:
-        from validation.canonical_workspace_validator import (
-            run_canonical_workspace_validation,
+        from validation.workspace_readiness_authority import (
+            generate_workspace_readiness_report,
+            write_workspace_readiness_json,
         )
 
         _append_lifecycle_record(
             workspace_root,
-            "validate_workspace_started",
+            "workspace_ready_started",
             {"workspace_root": str(workspace_root)},
         )
-        report = run_canonical_workspace_validation(workspace_root, repo_root)
-        print(json.dumps(report, indent=2, sort_keys=True))
+        report = generate_workspace_readiness_report(workspace_root, repo_root)
+        write_workspace_readiness_json(workspace_root, report)
+
         _append_lifecycle_record(
             workspace_root,
-            "validate_workspace_completed",
-            {
-                "workspace_root": str(workspace_root),
-                "valid": bool(report.get("valid", False)),
-            },
+            "workspace_ready_completed",
+            {"workspace_root": str(workspace_root), "ready": report.get("ready", False)},
         )
-        if not bool(report.get("valid", False)):
-            logger.error(f"Continuity validation failed: {workspace_root}")
+
+        if getattr(args, "json", False):
+            print(json.dumps(report, indent=2, sort_keys=True))
+            sys.exit(0 if report.get("ready", False) else 1)
+
+        print("PECS Workspace Readiness")
+        print("Workspace:", workspace_root)
+        print()
+
+        component_keys = [
+            ("Installation", "installation"),
+            ("Workspace Assets", "workspace_assets"),
+            ("Bridge", "bridge"),
+            ("Daemon Health", "daemon"),
+            ("Topology", "topology"),
+            ("Workspace Graph", "workspace_graph"),
+            ("Workspace Registry", "workspace_registry"),
+            ("Validation Status", "canonical_validation"),
+            ("Consumer Integration", "consumer_integration"),
+        ]
+
+        blocking_errors = []
+        missing_artifacts = []
+        warnings = []
+
+        for label, key in component_keys:
+            component = report.get(key, {})
+            status = component.get("status", "UNKNOWN")
+            print(f"{label:24} {status}")
+            if status != "PASS":
+                reason = str(component.get("reason", "n/a"))
+                action = str(component.get("recommended_action", "n/a"))
+                print(f"  reason: {reason}")
+                print(f"  recommended_action: {action}")
+                blocking_errors.append(f"{label}: {reason}")
+                if "missing" in reason.lower() or "artifact" in reason.lower():
+                    missing_artifacts.append(f"{label}: {reason}")
+            elif component.get("warnings"):
+                warnings.extend(component.get("warnings", []))
+
+        print()
+        if missing_artifacts:
+            print("Missing Artifacts:")
+            for artifact in missing_artifacts:
+                print(f"  - {artifact}")
+            print()
+
+        if blocking_errors:
+            print("Blocking Errors:")
+            for error in blocking_errors:
+                print(f"  - {error}")
+            print()
+
+        if warnings:
+            print("Warnings:")
+            for warning in warnings:
+                print(f"  - {warning}")
+            print()
+
+        print("Overall")
+        print(report.get("overall", {}).get("status", "NOT READY"))
+
+        if not bool(report.get("ready", False)):
             sys.exit(1)
-        logger.info(f"Continuity validation completed: {workspace_root}")
+        sys.exit(0)
     except Exception as e:
         _append_lifecycle_record(
             workspace_root,
-            "validate_workspace_failed",
+            "workspace_ready_failed",
             {"workspace_root": str(workspace_root), "error": str(e)},
         )
-        logger.error(f"Continuity validation failed: {e}")
+        logger.error(f"Workspace readiness evaluation failed: {e}")
         sys.exit(1)
 
 
-def _pecs_id_to_path(workspace_root: Path, pecs_id: str) -> Path:
+def _cmd_validate_workspace(args: argparse.Namespace) -> None:
     """Convert a PECS_ID module anchor back to a workspace-relative path."""
     body = pecs_id
     if body.startswith("PECS_ID:"):
@@ -1673,11 +1738,11 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
             health_state.get("status", "unknown"),
         )
         logger.info(
-            "  Workspace graph health: %s",
+            "  Workspace graph validation: %s",
             "healthy" if graph_validation.get("valid", False) else "unhealthy",
         )
         logger.info(
-            "  Workspace registry health: %s",
+            "  Workspace registry validation: %s",
             "healthy" if registry_validation.get("valid", False) else "unhealthy",
         )
         logger.info(
@@ -2119,6 +2184,45 @@ def main() -> None:
     hydrate_parser.set_defaults(func=_cmd_refresh_workspace)
 
     # Legacy validate command
+    workspace_ready_parser = subparsers.add_parser(
+        "workspace-ready",
+        help="Evaluate workspace readiness using the canonical Workspace Readiness Authority.",
+        description="Run the Workspace Readiness Authority and report whether the target workspace is ready.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Exit codes:\n"
+            "  0 = workspace is ready\n"
+            "  1 = workspace is not ready or an evaluation error occurred\n"
+            "  2 = invalid usage or missing workspace path\n\n"
+            "Usage examples:\n"
+            "  pecs workspace-ready /path/to/workspace\n"
+            "  pecs workspace-ready --workspace /path/to/workspace --json\n"
+        ),
+    )
+    workspace_ready_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        metavar="WORKSPACE_ROOT",
+        help="Target workspace root path",
+    )
+    workspace_ready_parser.add_argument(
+        "--workspace",
+        dest="workspace_root_override",
+        metavar="WORKSPACE_ROOT",
+        help="Target workspace root path",
+    )
+    workspace_ready_parser.add_argument(
+        "--repo-root",
+        default="",
+        help="PECS repository root",
+    )
+    workspace_ready_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON report.",
+    )
+    workspace_ready_parser.set_defaults(func=_cmd_workspace_ready)
+
     validate_parser = subparsers.add_parser(
         "validate", help="Validate continuity state"
     )

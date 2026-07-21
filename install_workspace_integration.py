@@ -331,6 +331,20 @@ def _read_workspace_install_root(workspace_root: Path) -> Optional[Path]:
     return Path(raw).resolve()
 
 
+def _manifest_manager_available(repo_root: Path) -> bool:
+    try:
+        from pecs_pro.workspace_assets_manager import WorkspaceAssetsManager  # type: ignore
+
+        return True
+    except Exception:
+        try:
+            from .workspace_assets_manager import WorkspaceAssetsManager  # type: ignore
+
+            return True
+        except Exception:
+            return False
+
+
 def register_workspace(repo_root: Path, workspace_root: Path) -> None:
     registry_path = _workspace_registry_path(repo_root)
     workspace_list: List[str] = []
@@ -1789,24 +1803,25 @@ def _cleanup_stale_local_runtime_copy(workspace_root: Path) -> None:
 
 def install_workspace(workspace_root: Path, repo_root: Path, preserve_existing: bool = True) -> None:
     _ensure_global_runtime_registry(repo_root)
-    _install_chat_tools(workspace_root, repo_root)
-    _install_bridge_runtime(workspace_root, repo_root)
-    _merge_tasks(workspace_root / ".vscode" / "tasks.json", repo_root)
-    _merge_json_dict(
-        workspace_root / ".vscode" / "settings.json",
-        {
-            "pecs.contextPath": ".pecs/active_context.json",
-        },
-    )
-    _write_continue_config(workspace_root, repo_root)
-    _write_continue_rules(workspace_root)
-    _write_copilot_instructions(workspace_root, repo_root)
-    _install_consumer_guidance_assets(workspace_root, repo_root)
-    _copy_manual_setup_guide(workspace_root, repo_root)
-    _write_readme(workspace_root)
+
+    if not _manifest_manager_available(repo_root):
+        _install_chat_tools(workspace_root, repo_root)
+        _install_bridge_runtime(workspace_root, repo_root)
+        _merge_tasks(workspace_root / ".vscode" / "tasks.json", repo_root)
+        _merge_json_dict(
+            workspace_root / ".vscode" / "settings.json",
+            {
+                "pecs.contextPath": ".pecs/active_context.json",
+            },
+        )
+        _install_workspace_local_launchers(workspace_root, repo_root)
+    else:
+        logger.info(
+            "Manifest-based workspace assets manager is available; skipping legacy managed asset deployment"
+        )
+
     _cleanup_stale_local_runtime_copy(workspace_root)
     _write_workspace_install_root(workspace_root, repo_root)
-    _install_workspace_local_launchers(workspace_root, repo_root)
     register_workspace(repo_root, workspace_root)
 
 

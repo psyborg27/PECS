@@ -14,6 +14,7 @@ from integrations.copilot_adapter import CopilotAdapter
 from integrations.kimi_adapter import KimiAdapter
 from integrations.pecs_lite_runtime_adapter import PECSLiteRuntimeAdapter
 from workspace_assets_manager import WorkspaceAssetsManager
+from validation.consumer_consultation_validator import ConsumerConsultationComplianceValidator
 
 
 class _DummyTopologyRetriever:
@@ -85,12 +86,7 @@ def run_canonical_workspace_validation(
     )
 
     graph_ok = bool(graph_validation.get("valid", False))
-    if not graph_validation:
-        graph_ok = bool(daemon_health.get("topology_ready", False))
-
     registry_ok = bool(registry_validation.get("valid", False))
-    if not registry_validation:
-        registry_ok = bool(daemon_health.get("continuity_ready", False))
 
     consumer_assets_ok = all(
         (workspace_root / path).exists()
@@ -145,6 +141,10 @@ def run_canonical_workspace_validation(
     contract_shape_ok = len({tuple(sorted(signature)) for signature in contract_signatures}) == 1
     contract_ok = all(v.get("valid", False) for v in contract_validation) and contract_shape_ok and contract_schema_ok
 
+    compliance_validator = ConsumerConsultationComplianceValidator(workspace_root)
+    consumer_compliance_results = compliance_validator.validate_all()
+    compliance_ok = all(result.valid for result in consumer_compliance_results)
+
     checks = {
         "managed_assets": bool(managed_assets_result.get("valid", False)),
         "runtime": runtime_ok,
@@ -155,6 +155,7 @@ def run_canonical_workspace_validation(
         "diagnostics": cycle_ok,
         "projection_engine": projection_ok,
         "canonical_contract": contract_ok,
+        "consumer_compliance": compliance_ok,
         "workspace_health": daemon_ok and graph_ok and registry_ok,
     }
 
@@ -181,6 +182,16 @@ def run_canonical_workspace_validation(
             "workspace_registry_validation": registry_validation,
             "canonical_contract_validation": contract_validation,
             "canonical_contract_shape_identical": contract_shape_ok,
+            "consumer_compliance_results": [
+                {
+                    "consumer": result.consumer,
+                    "valid": result.valid,
+                    "compliance": result.compliance,
+                    "report_errors": result.report_errors,
+                    "details": result.details,
+                }
+                for result in consumer_compliance_results
+            ],
             "projection_schema": projection.get("schema", ""),
         },
     }

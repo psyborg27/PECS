@@ -277,6 +277,8 @@ class UpgradeWorkspacePipeline:
             ".pecs/session_context.json",
             ".pecs/daemon_state.json",
             ".pecs/daemon_health.json",
+            ".pecs/workspace_graph_validation.json",
+            ".pecs/workspace_registry_validation.json",
             ".pecs/runtime_activation.jsonl",
             ".pecs/continuity/active_topology.json",
             ".pecs/continuity/locality_state.json",

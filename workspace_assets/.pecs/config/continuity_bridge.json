@@ -1,0 +1,7 @@
+{
+  "compare_before_write": true,
+  "mode": "exploratory",
+  "omit_empty_sections": true,
+  "schema": "pecs.bridge.config.v1",
+  "sparse_output": true
+}

@@ -21,13 +21,13 @@ def main() -> None:
         "--dump-workspace-graph",
         action="store_true",
         default=False,
-        help="Write workspace_graph.json and workspace_graph_validation.json on each refresh.",
+        help="Write workspace_graph.json on each refresh in addition to required validation artifacts.",
     )
     parser.add_argument(
         "--dump-workspace-registry",
         action="store_true",
         default=False,
-        help="Write workspace_registry.json and workspace_registry_validation.json on each refresh.",
+        help="Write workspace_registry.json on each refresh in addition to required validation artifacts.",
     )
     args = parser.parse_args()
 

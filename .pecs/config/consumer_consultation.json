@@ -1,0 +1,1 @@
+{"schema": "pecs.consumer_consultation_config.v1", "global_enabled": false, "consumers": {"copilot": false, "continue": false, "commandcode": false, "kimi": false}}

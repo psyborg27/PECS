@@ -1,4 +1,4 @@
-# PECS CODING PROTOCOL
+# Engineering Protocol
 
 ## PRIMARY OBJECTIVE
 
@@ -28,32 +28,6 @@ Canonical ownership must be inferred from:
 - active symbol references
 - actual dependency chains
 - currently active execution paths
-
----
-
-# CONTINUITY MAP OPERATING RULE
-
-CONTINUITY_MAP.md is:
-
-A LIVE CONTINUITY CONVERGENCE ARTIFACT
-
-NOT:
-
-ABSOLUTE ARCHITECTURAL TRUTH
-
-The continuity map must:
-
-- evolve gradually
-- align with workspace reality gradually
-- preserve uncertainty where confidence is weak
-- annotate duplicates explicitly
-- annotate locality ambiguity explicitly
-
-DO NOT:
-
-- aggressively rewrite continuity assumptions
-- aggressively collapse duplicate clusters
-- remove uncertainty prematurely
 
 ---
 

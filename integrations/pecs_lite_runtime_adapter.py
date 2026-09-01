@@ -206,10 +206,10 @@ class PECSLiteRuntimeAdapter:
 
     @classmethod
     def _derive_terms(cls, query: str) -> List[str]:
-        terms = [t.strip() for t in str(query or "").split() if t.strip()]
-        if not terms:
-            return ["workspace"]
-        return terms
+        from pecs_query.query_parser import QueryParser
+
+        result = QueryParser.parse(str(query or ""))
+        return result.terms
 
     @classmethod
     def _profile_limits(cls, profile_name: str) -> Dict[str, int]:

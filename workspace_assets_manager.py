@@ -282,6 +282,8 @@ class WorkspaceAssetsManager:
         elif strategy == "preserve_existing":
             if not target.exists():
                 shutil.copy2(source, target)
+        elif strategy == "replace_marker_block":
+            self._replace_marker_block(asset_id, source, target)
         else:
             raise ValueError(f"Unsupported merge strategy: {strategy}")
 
@@ -325,6 +327,68 @@ class WorkspaceAssetsManager:
         separator = "\n\n" if target_content.strip() else ""
         target.write_text(
             target_content.rstrip() + separator + marker + "\n" + source_content.strip() + "\n",
+            encoding="utf-8",
+        )
+
+    _PECS_MARKER_BEGIN = "<!-- PECS INSTRUCTIONS START -->"
+    _PECS_MARKER_END = "<!-- PECS INSTRUCTIONS END -->"
+    _PECS_MARKER_BEGIN_YAML = "# PECS INSTRUCTIONS START"
+    _PECS_MARKER_END_YAML = "# PECS INSTRUCTIONS END"
+
+    def _markers_for_target(self, target: Path) -> tuple:
+        """Return (begin_marker, end_marker) based on file type."""
+        suffix = target.suffix.lower()
+        if suffix in (".yaml", ".yml"):
+            return (self._PECS_MARKER_BEGIN_YAML, self._PECS_MARKER_END_YAML)
+        return (self._PECS_MARKER_BEGIN, self._PECS_MARKER_END)
+
+    def _replace_marker_block(
+        self,
+        asset_id: str,
+        source: Path,
+        target: Path,
+    ) -> None:
+        """Delete everything between PECS INSTRUCTIONS markers and regenerate
+        from the source template.
+
+        If the target file does not exist, it is created from the source.
+        If the markers are not found in the target, the source is written as-is
+        (complete replacement).
+        Content outside the markers is preserved unchanged.
+        """
+        source_content = source.read_text(encoding="utf-8")
+        begin_marker, end_marker = self._markers_for_target(target)
+
+        if not target.exists():
+            target.write_text(source_content, encoding="utf-8")
+            return
+
+        target_content = target.read_text(encoding="utf-8")
+        begin_idx = target_content.find(begin_marker)
+        end_idx = target_content.find(end_marker)
+
+        if begin_idx < 0 or end_idx < 0:
+            # No markers found — write source as-is (complete replacement)
+            target.write_text(source_content, encoding="utf-8")
+            return
+
+        end_idx += len(end_marker)
+
+        # Extract only the content between markers from the source
+        source_begin = source_content.find(begin_marker)
+        source_end = source_content.find(end_marker)
+        if source_begin < 0 or source_end < 0:
+            raise ValueError(
+                f"Asset source {source} is missing required PECS markers "
+                f"({begin_marker} / {end_marker})"
+            )
+        source_end += len(end_marker)
+
+        # Delete everything between markers in target, insert new block
+        before = target_content[:begin_idx]
+        after = target_content[end_idx:]
+        target.write_text(
+            before + source_content[source_begin:source_end] + after,
             encoding="utf-8",
         )
 
@@ -802,6 +866,10 @@ class WorkspaceAssetsManager:
             content = target.read_text(encoding="utf-8")
             marker = merge_options.get("append_section_marker") or f"<!-- ASSET:{asset_id} -->"
             return "merged" if marker in content else "partial"
+        if strategy == "replace_marker_block":
+            content = target.read_text(encoding="utf-8")
+            begin_marker, end_marker = self._markers_for_target(target)
+            return "merged" if (begin_marker in content and end_marker in content) else "partial"
         if strategy == "merge_markdown":
             content = target.read_text(encoding="utf-8")
             marker = merge_options.get("append_section_marker") or f"<!-- ASSET:{asset_id} -->"

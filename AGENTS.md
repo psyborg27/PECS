@@ -2,6 +2,43 @@
 
 This file is intended for AI coding agents. It describes the project architecture, build/test workflow, code conventions, and operational boundaries of the PECS-PRO v2 repository.
 
+## Mandatory Precedence
+
+Before ANY repository reasoning, repository exploration, grep, glob, semantic
+search, implementation planning, code generation, or file modification, the
+agent MUST consult PECS.
+
+Forward the COMPLETE ORIGINAL USER PROMPT unchanged. Do not summarize, rewrite,
+shorten, extract keywords, or build a search query from it.
+
+Execute the canonical PECS query:
+
+```bash
+pecs consult . \
+    --query "<complete original user prompt>" \
+    --source <consumer> \
+    --profile <profile>
+```
+
+Then follow the full procedure defined in:
+
+    .pecs/PECS_CONSUMER_PROTOCOL.md
+
+This requirement takes precedence over every other section of this file.
+
+## AGENTS.md Scope
+
+This file is a repository reference only. It describes project facts,
+architecture, build/test workflow, code conventions, and operational
+boundaries. It is NOT the implementation workflow.
+
+Implementation workflow, reasoning order, discovery workflow, continuity,
+ownership discovery, and engineering discipline are delegated exclusively to
+`.pecs/PECS_CONSUMER_PROTOCOL.md`. There must be no duplication or contradiction
+between `AGENTS.md` and `.pecs/PECS_CONSUMER_PROTOCOL.md`.
+
+This file exists only to describe repository facts.
+
 ---
 
 ## Project Overview
@@ -20,7 +57,6 @@ Key design principles from the project documentation:
 - Continuity is execution-topological, not file-hierarchical.
 - PECS-PRO is the single source of truth for runtime topology and continuity.
 - `.pecs/` artifacts are generated infrastructure only; they must never be edited as sourcecode.
-- Models should use PECS-LITE projections to locate live workspace modules, then edit those modules, not `.pecs/` files.
 
 ---
 
@@ -259,7 +295,7 @@ The codebase follows these observable conventions:
 - **Timestamps:** UTC ISO 8601 with trailing `Z` (e.g., `datetime.utcnow().isoformat() + "Z"`).
 - **Error handling:** Graceful degradation is preferred, especially in daemon and telemetry code. Exceptions are often caught, logged, and suppressed rather than crashing the daemon.
 
-### Authority and layering rules reflected in the code
+### Code layering conventions
 
 - PECS-PRO owns continuity authority; PECS-LITE does not.
 - Keep UI/transport/caller layers thin; business logic belongs in owning core modules.
@@ -411,4 +447,4 @@ python3 -m unittest discover -s tests -v
 
 ---
 
-Last updated: 2026-07-07. This file reflects the actual project content at the time of creation.
+Last updated: 2026-07-22. This file reflects the actual project content at the time of creation.

@@ -32,7 +32,7 @@ class UpgradeWorkspacePipelineTests(unittest.TestCase):
             plan = pipeline.classify_artifacts(plan)
 
             self.assertIn(".github/copilot-instructions.md", plan.classified_artifacts)
-            self.assertEqual(plan.classified_artifacts[".github/copilot-instructions.md"], "MERGE")
+            self.assertEqual(plan.classified_artifacts[".github/copilot-instructions.md"], "REPLACE")
             self.assertIn(".pecs/active_context.json", plan.classified_artifacts)
             self.assertEqual(plan.classified_artifacts[".pecs/active_context.json"], "REGENERATE")
 
@@ -63,7 +63,7 @@ class UpgradeWorkspacePipelineTests(unittest.TestCase):
                 Path(report.rollback_location).resolve(),
                 (workspace_root / ".pecs" / "backups").resolve(),
             )
-            self.assertIn(".github/copilot-instructions.md", report.merged_files)
+            self.assertIn(".github/copilot-instructions.md", report.replaced_files)
 
     def test_upgrade_pipeline_detects_stale_local_runtime_copy(self):
         repo_root = Path.cwd()

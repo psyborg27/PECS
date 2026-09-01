@@ -396,6 +396,61 @@ def _cmd_observe_projection_daemon(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_consult(args: argparse.Namespace) -> None:
+    """
+    Canonical consumer-facing PECS query command.
+
+    Hides all implementation detail from AI consumers. The consumer executes
+    ONE command::
+
+        pecs consult <workspace> --query "what does this module do" --source continue
+
+    Returns a JSON projection with runtime targets, secondary neighbors,
+    status, and telemetry.
+    """
+    workspace_root = (
+        Path(args.workspace_root).resolve()
+        if args.workspace_root
+        else Path.cwd()
+    )
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    query = args.query or "runtime locality"
+    query_source = args.source or "consumer"
+    profile = args.profile or "medium"
+
+    try:
+        from integrations.pecs_lite_runtime_adapter import PECSLiteRuntimeAdapter
+    except ImportError:
+        try:
+            from pecs_pro.integrations.pecs_lite_runtime_adapter import PECSLiteRuntimeAdapter
+        except ImportError:
+            logger.error("PECS-LITE runtime adapter not available")
+            sys.exit(1)
+
+    projection = PECSLiteRuntimeAdapter.build_projection_safe(
+        str(workspace_root),
+        query=query,
+        model_name=args.model_name or "",
+        model_source=args.model_source or "",
+        context_window=args.context_window,
+        model_size=args.model_size or "medium",
+        provider=args.provider or "",
+        profile_class=profile,
+        local_vs_frontier=args.local_vs_frontier or "unknown",
+        reasoning_capability_class=args.reasoning_capability_class or "unknown",
+        query_source=query_source,
+    )
+
+    output = json.dumps(projection, indent=2, sort_keys=True)
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+    else:
+        print(output)
+
+
 def _run_workspace_bridge(workspace_root: Path, command: str) -> None:
     """Run workspace bridge command by importing from installed PECS runtime.
 
@@ -1771,6 +1826,613 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _cmd_daemon_start(args: argparse.Namespace) -> None:
+    """Start the PECS daemon."""
+    workspace_root = Path(args.workspace_root).resolve()
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+    _start_workspace_daemon(workspace_root)
+
+
+def _cmd_daemon_stop(args: argparse.Namespace) -> None:
+    """Stop the PECS daemon."""
+    workspace_root = Path(args.workspace_root).resolve()
+    _stop_workspace_daemon(workspace_root)
+
+
+def _cmd_daemon_restart(args: argparse.Namespace) -> None:
+    """Restart the PECS daemon."""
+    workspace_root = Path(args.workspace_root).resolve()
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+    _stop_workspace_daemon(workspace_root)
+    _start_workspace_daemon(workspace_root)
+    logger.info(f"Daemon restarted: {workspace_root}")
+
+
+def _cmd_daemon_status_sub(args: argparse.Namespace) -> None:
+    """Show daemon status (subcommand variant)."""
+    workspace_root = Path(args.workspace_root).resolve()
+    daemon_pid_file = workspace_root / ".pecs" / "daemon.pid"
+    health_state = _load_health_state(workspace_root)
+
+    if not daemon_pid_file.exists():
+        print("Daemon: STOPPED (no PID file)")
+        return
+
+    pid = _read_pid_file(daemon_pid_file)
+    if pid is None or not _is_process_running(pid):
+        print("Daemon: STOPPED (stale PID file)")
+        return
+
+    print(f"Daemon: RUNNING (PID {pid})")
+    if health_state:
+        status = health_state.get("status", "unknown")
+        print(f"Health: {status}")
+        print(f"Topology ready: {health_state.get('topology_ready', False)}")
+        print(f"Retrieval ready: {health_state.get('retrieval_ready', False)}")
+        print(f"Continuity ready: {health_state.get('continuity_ready', False)}")
+
+
+def _cmd_clean(args: argparse.Namespace) -> None:
+    """Remove generated PECS artifacts from a workspace."""
+    workspace_root = Path(args.workspace_root).resolve()
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    remove_all = args.all
+    remove_artifacts = args.artifacts or remove_all
+    remove_runtime = args.runtime or remove_all
+
+    # Stop daemon if running
+    _stop_workspace_daemon(workspace_root)
+
+    pecs_dir = workspace_root / ".pecs"
+    removed = []
+
+    if remove_artifacts:
+        generated_patterns = [
+            "workspace_graph_validation.json",
+            "workspace_registry_validation.json",
+            "workspace_graph.json",
+            "workspace_registry.json",
+            "active_context.json",
+            "compact_bundle.json",
+            "session_context.json",
+            "continuity_refresh_state.json",
+            "daemon_health.json",
+            "daemon_cycle_validation.json",
+            "daemon_state.json",
+            "daemon.pid",
+            "runtime_activation.jsonl",
+            "chat_history_state.json",
+        ]
+        for pattern in generated_patterns:
+            target = pecs_dir / pattern
+            if target.exists():
+                target.unlink()
+                removed.append(pattern)
+
+    if remove_runtime:
+        runtime_patterns = [
+            "locality_index.json",
+            "topology_compact.json",
+        ]
+        for pattern in runtime_patterns:
+            target = pecs_dir / pattern
+            if target.exists():
+                target.unlink()
+                removed.append(pattern)
+
+        # Runtime subdirectories
+        for subdir in ["runtime", "logs", "runtime_topology_snapshots", "continuity"]:
+            target = pecs_dir / subdir
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+                removed.append(str(subdir) + "/")
+
+    if removed:
+        logger.info(f"Removed {len(removed)} artifact(s):")
+        for r in removed:
+            logger.info(f"  - {r}")
+    else:
+        logger.info("No artifacts to remove.")
+
+
+def _cmd_rebuild(args: argparse.Namespace) -> None:
+    """Deterministic clean rebuild of all PECS artifacts."""
+    workspace_root = Path(args.workspace_root).resolve()
+    repo_root = (
+        Path(args.repo_root).resolve()
+        if args.repo_root
+        else Path(__file__).resolve().parent
+    )
+
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    incremental = args.incremental
+
+    logger.info(f"PECS rebuild {'(incremental)' if incremental else '(clean)'}")
+    logger.info(f"Workspace: {workspace_root}")
+    logger.info(f"PECS repo: {repo_root}")
+
+    # Phase 1: stop daemon
+    logger.info("Phase 1/6: Stopping daemon...")
+    _stop_workspace_daemon(workspace_root)
+
+    if not incremental:
+        # Phase 2: clean artifacts
+        logger.info("Phase 2/6: Cleaning artifacts...")
+        pecs_dir = workspace_root / ".pecs"
+        preserve = [
+            "config/", "bridge/", "tools/", "README.md",
+            "README_MANUAL_SETUP.md", "README_WORKSPACE_INTEGRATION.md",
+            "README_WORKSPACE_PREPARATION.md", "WORKSPACE_BOOTSTRAP.md",
+            "PECS_CONSUMER_PROTOCOL.md", "ai_chat_history.json",
+            "run_pecs.sh", "run_pecs.cmd", "run_pecs.ps1",
+            "run_pecs_daemon.sh", "run_pecs_daemon.cmd", "run_pecs_daemon.ps1",
+            "backups/",
+        ]
+        for item in pecs_dir.iterdir():
+            rel = item.name + "/" if item.is_dir() else item.name
+            if any(rel.startswith(p) for p in preserve):
+                continue
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink(missing_ok=True)
+
+    # Phase 3: install assets
+    logger.info("Phase 3/6: Installing assets...")
+    try:
+        manager = WorkspaceAssetsManager(repo_root, workspace_root)
+        manager.install_assets(upgrade=True, verify=False)
+        logger.info("Assets installed.")
+    except Exception as e:
+        logger.warning(f"Asset installation warning: {e}")
+
+    # Phase 4: rebuild runtime data
+    logger.info("Phase 4/6: Rebuilding runtime data...")
+    _run_workspace_bridge(workspace_root, "refresh")
+
+    # Phase 5: start daemon
+    logger.info("Phase 5/6: Starting daemon...")
+    _start_workspace_daemon(workspace_root)
+
+    # Phase 6: validate
+    logger.info("Phase 6/6: Validating...")
+    try:
+        from validation.canonical_workspace_validator import (
+            run_canonical_workspace_validation,
+        )
+        result = run_canonical_workspace_validation(workspace_root, repo_root)
+        valid = bool(result.get("valid", False))
+        logger.info(f"Canonical validation: {'PASS' if valid else 'FAIL'}")
+    except Exception as e:
+        logger.warning(f"Validation error: {e}")
+        valid = False
+
+    logger.info("Rebuild complete.")
+    logger.info(f"Next: run 'pecs workspace-ready --workspace {workspace_root}'")
+    sys.exit(0 if valid else 1)
+
+
+def _cmd_validate_artifacts(args: argparse.Namespace) -> None:
+    """Validate individual PECS artifacts for consistency."""
+    workspace_root = Path(args.workspace_root).resolve()
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    pecs_dir = workspace_root / ".pecs"
+    report = {
+        "schema": "pecs.artifact_validation.v1",
+        "workspace_root": str(workspace_root),
+        "artifacts": {},
+        "valid": True,
+        "errors": [],
+    }
+
+    # Validate each expected artifact
+    checks = [
+        ("locality_index.json", "locality", ["PECS_ID:"]),
+        ("topology_compact.json", "topology", ["edges", "entrypoints"]),
+        ("active_context.json", "context", ["activated_objects"]),
+        ("compact_bundle.json", "compact", ["bundle", "active_topology_zone"]),
+        ("session_context.json", "session", ["active_objects", "active_paths"]),
+        ("daemon_state.json", "daemon_state", ["runtime_reachable_count"]),
+        ("daemon_health.json", "daemon_health", ["status"]),
+        ("workspace_graph_validation.json", "graph_validation", ["valid", "graph_hash"]),
+        ("workspace_registry_validation.json", "registry_validation", ["valid", "registry_hash"]),
+        ("daemon_cycle_validation.json", "cycle_validation", ["topology_validation"]),
+    ]
+
+    for filename, section, required_keys in checks:
+        path = pecs_dir / filename
+        artifact_report = {"exists": path.exists(), "valid": False, "errors": []}
+        if not path.exists():
+            artifact_report["valid"] = False
+            artifact_report["errors"].append("file not found")
+        else:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if section == "locality":
+                    # Flat dict keyed by PECS_ID: entries, not a nested key
+                    expected_prefix = required_keys[0] if required_keys else "PECS_ID:"
+                    if isinstance(data, dict) and any(
+                        k.startswith(expected_prefix) for k in data
+                    ):
+                        artifact_report["valid"] = True
+                    else:
+                        artifact_report["errors"].append(
+                            f"missing {expected_prefix} prefixed entries"
+                        )
+                else:
+                    for key in required_keys:
+                        if key not in data:
+                            artifact_report["errors"].append(f"missing key: {key}")
+                    artifact_report["valid"] = len(artifact_report["errors"]) == 0
+            except Exception as e:
+                artifact_report["errors"].append(f"parse error: {e}")
+                artifact_report["valid"] = False
+
+        report["artifacts"][filename] = artifact_report
+        if not artifact_report["valid"]:
+            report["valid"] = False
+            report["errors"].extend(
+                f"{filename}: {e}" for e in artifact_report["errors"]
+            )
+
+    if args.json:
+        report["timestamp"] = datetime.datetime.utcnow().isoformat() + "Z"
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        logger.info("=== Artifact Validation ===")
+        for name, ar in sorted(report["artifacts"].items()):
+            status = "PASS" if ar["valid"] else "FAIL"
+            logger.info(f"  {status:4s} {name}")
+            for e in ar["errors"]:
+                logger.info(f"         {e}")
+        logger.info(f"Overall: {'VALID' if report['valid'] else 'INVALID'}")
+
+    sys.exit(0 if report["valid"] else 1)
+
+
+def _cmd_audit_artifacts(args: argparse.Namespace) -> None:
+    """Comprehensive audit of PECS artifacts."""
+    workspace_root = Path(args.workspace_root).resolve()
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    pecs_dir = workspace_root / ".pecs"
+    concepts = args.concepts or [
+        "Annotation", "Toolbar", "OCR", "TOC", "Bookmark",
+        "Notes", "Workspace", "Selection", "Rendering", "Export", "Import",
+    ]
+
+    report = {
+        "schema": "pecs.artifact_audit.v1",
+        "workspace_root": str(workspace_root),
+        "generator_version": "1.0.0a1",
+        "creation_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "artifact_inventory": {},
+        "dependency_graph": {},
+        "semantic_coverage": {},
+        "counts": {},
+        "warnings": [],
+    }
+
+    # Inventory each artifact
+    artifact_files = [
+        "locality_index.json", "topology_compact.json", "active_context.json",
+        "compact_bundle.json", "session_context.json", "daemon_state.json",
+        "daemon_health.json", "daemon_cycle_validation.json",
+        "workspace_graph_validation.json", "workspace_registry_validation.json",
+        "workspace_graph.json", "workspace_registry.json",
+        "runtime_activation.jsonl",
+    ]
+
+    for filename in artifact_files:
+        path = pecs_dir / filename
+        info = {"exists": path.exists(), "size": 0, "stale": False}
+        if path.exists():
+            info["size"] = path.stat().st_size
+        report["artifact_inventory"][filename] = info
+
+    # Load key data
+    locality = _load_json(pecs_dir / "locality_index.json", {})
+    topology = _load_json(pecs_dir / "topology_compact.json", {})
+    graph_val = _load_json(pecs_dir / "workspace_graph_validation.json", {})
+    registry_val = _load_json(pecs_dir / "workspace_registry_validation.json", {})
+
+    report["counts"] = {
+        "locality_entries": len(locality) if isinstance(locality, dict) else 0,
+        "topology_edges": len(topology.get("edges", [])),
+        "topology_entrypoints": len(topology.get("entrypoints", [])),
+        "graph_validation_mismatches": graph_val.get("mismatch_count", 0),
+        "registry_validation_mismatches": registry_val.get("mismatch_count", 0),
+        "graph_nodes": graph_val.get("legacy_index_summary", {}).get("graph_index_nodes", 0),
+        "ownership_entries": graph_val.get("legacy_index_summary", {}).get("ownership_index_entries", 0),
+    }
+
+    daemon_state = _load_json(pecs_dir / "daemon_state.json", {})
+    report["counts"]["runtime_reachable"] = daemon_state.get("runtime_reachable_count", 0)
+    report["counts"]["topology_edge_count"] = daemon_state.get("topology_edge_count", 0)
+    report["counts"]["locality_payload_count"] = daemon_state.get("runtime_locality_payload_count", 0)
+
+    # Semantic coverage for each concept
+    for concept in concepts:
+        cl = concept.lower()
+        coverage = {"concept": concept, "status": "missing", "files": [], "symbols": []}
+
+        if isinstance(locality, dict):
+            matches = [k for k in locality if cl in k.lower()]
+            if matches:
+                coverage["status"] = "present"
+                coverage["files"] = sorted(matches)[:10]
+
+        # Also check topology edges
+        if isinstance(topology, dict):
+            edge_matches = [
+                e for e in topology.get("edges", [])
+                if cl in str(e.get("from", "")).lower() or cl in str(e.get("to", "")).lower()
+            ]
+            if edge_matches:
+                coverage["status"] = "present" if coverage["status"] == "missing" else "present"
+                coverage["symbols"] = sorted(set(
+                    list(e.get("from", "") for e in edge_matches[:5])
+                    + list(e.get("to", "") for e in edge_matches[:5])
+                ))
+
+        report["semantic_coverage"][concept] = coverage
+
+    # Dependency graph (which artifacts reference which)
+    report["dependency_graph"] = {
+        "locality_index.json": ["topology_compact.json"],
+        "workspace_graph.json": ["locality_index.json", "topology_compact.json"],
+        "workspace_registry.json": ["workspace_graph.json"],
+        "compact_bundle.json": ["locality_index.json", "topology_compact.json", "active_context.json"],
+        "daemon_health.json": ["daemon_state.json"],
+    }
+
+    # Warnings
+    for artifact, deps in report["dependency_graph"].items():
+        if report["artifact_inventory"].get(artifact, {}).get("exists"):
+            for dep in deps:
+                if not report["artifact_inventory"].get(dep, {}).get("exists"):
+                    report["warnings"].append(
+                        f"{artifact} depends on missing {dep}"
+                    )
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print("\n=== PECS Artifact Audit ===")
+        print(f"Schema: {report['schema']}")
+        print(f"Generated: {report['creation_timestamp']}")
+        print(f"\nCounts:")
+        for k, v in sorted(report["counts"].items()):
+            print(f"  {k}: {v}")
+        print(f"\nSemantic Coverage:")
+        for c, cov in sorted(report["semantic_coverage"].items()):
+            print(f"  {cov['status']:8s} {c}")
+        if report["warnings"]:
+            print(f"\nWarnings:")
+            for w in report["warnings"]:
+                print(f"  - {w}")
+
+
+def _cmd_explain_query(args: argparse.Namespace) -> None:
+    """Diagnose why PECS returns specific runtime targets."""
+    workspace_root = Path(args.workspace_root).resolve()
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    query = args.query
+    from pecs_query.query_parser import QueryParser
+
+    parse_result = QueryParser.parse(query)
+    query_terms = parse_result.terms
+
+    pecs_dir = workspace_root / ".pecs"
+    locality = _load_json(pecs_dir / "locality_index.json", {})
+    topology = _load_json(pecs_dir / "topology_compact.json", {})
+
+    explanation = {
+        "query": query,
+        "parsed_terms": query_terms,
+        "sections": dict(parse_result.sections),
+        "semantic_hints": dict(parse_result.semantic_hints),
+        "semantic_matches": {},
+        "locality_matches": [],
+        "locality_match_count": 0,
+        "topology_matches": [],
+        "topology_match_count": 0,
+        "graph_seed_nodes": [],
+        "excluded_targets": [],
+        "confidence": 0.0,
+    }
+
+    # Find matches in locality payload
+    if isinstance(locality, dict):
+        for pecs_id, meta in sorted(locality.items()):
+            if not isinstance(meta, dict):
+                continue
+            text = (pecs_id + " " + str(meta)).lower()
+            matching = [t for t in query_terms if t in text]
+            if matching:
+                explanation["locality_matches"].append({
+                    "id": pecs_id,
+                    "matched_terms": matching,
+                    "file": meta.get("file", ""),
+                    "zone": meta.get("runtime_zone", ""),
+                })
+
+    # Find matches in topology edges
+    if isinstance(topology, dict):
+        for edge in topology.get("edges", []):
+            if not isinstance(edge, dict):
+                continue
+            text = (str(edge.get("from", "")) + " " + str(edge.get("to", ""))).lower()
+            matching = [t for t in query_terms if t in text]
+            if matching:
+                explanation["topology_matches"].append({
+                    "from": edge.get("from", ""),
+                    "to": edge.get("to", ""),
+                    "type": edge.get("type", ""),
+                    "matched_terms": matching,
+                })
+
+    # Excluded analysis
+    explanation["locality_match_count"] = len(explanation["locality_matches"])
+    explanation["topology_match_count"] = len(explanation["topology_matches"])
+    visited_ids = set(m["id"] for m in explanation["locality_matches"])
+    if isinstance(locality, dict):
+        for pecs_id, meta in locality.items():
+            if not isinstance(meta, dict):
+                continue
+            if pecs_id not in visited_ids:
+                text = pecs_id.lower()
+                partial = [t for t in query_terms if any(
+                    c in text for c in t[:3]
+                )]
+                if partial:
+                    explanation["excluded_targets"].append({
+                        "id": pecs_id,
+                        "reason": "term match too weak",
+                        "partial_terms": partial,
+                    })
+
+    matches = explanation["locality_match_count"]
+    topo = explanation["topology_match_count"]
+    explanation["confidence"] = min(
+        1.0,
+        matches / max(1, len(query_terms)) * 0.5
+        + topo / max(1, len(query_terms)) * 0.3
+    )
+
+    if args.json:
+        explanation["timestamp"] = datetime.datetime.utcnow().isoformat() + "Z"
+        print(json.dumps(explanation, indent=2, sort_keys=True))
+    else:
+        print(f"\n=== Query Explanation ===")
+        print(f"Query: {query}")
+        print(f"Parsed terms: {query_terms}")
+        print(f"\nLocality matches ({len(explanation['locality_matches'])}):")
+        for m in explanation["locality_matches"][:10]:
+            print(f"  {m['id']}")
+            print(f"    file: {m['file']}")
+            print(f"    matched: {m['matched_terms']}")
+        if len(explanation["locality_matches"]) > 10:
+            print(f"  ... and {len(explanation['locality_matches']) - 10} more")
+        print(f"\nTopology matches ({len(explanation['topology_matches'])}):")
+        for m in explanation["topology_matches"][:5]:
+            print(f"  {m['from']} --{m['type']}--> {m['to']}")
+        print(f"\nConfidence: {explanation['confidence']:.2f}")
+
+
+def _cmd_compare_query(args: argparse.Namespace) -> None:
+    """Compare PECS projection against text search for a query."""
+    workspace_root = Path(args.workspace_root).resolve()
+    if not workspace_root.exists():
+        logger.error(f"Workspace does not exist: {workspace_root}")
+        sys.exit(1)
+
+    query = args.query
+    from pecs_query.query_parser import QueryParser
+
+    parse_result = QueryParser.parse(query)
+    query_terms = parse_result.terms
+
+    pecs_dir = workspace_root / ".pecs"
+    locality = _load_json(pecs_dir / "locality_index.json", {})
+    topology = _load_json(pecs_dir / "topology_compact.json", {})
+
+    report = {
+        "query": query,
+        "parsed_terms": query_terms,
+        "sections": dict(parse_result.sections),
+        "semantic_hints": dict(parse_result.semantic_hints),
+        "methods": {},
+        "differences": [],
+    }
+
+    # Method 1: filesystem grep (text search)
+    grep_results = set()
+    for term in query_terms:
+        try:
+            result = subprocess.run(
+                ["grep", "-rl", "--include=*.py", term, str(workspace_root)],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(workspace_root),
+            )
+            for line in result.stdout.strip().splitlines():
+                if line:
+                    grep_results.add(line)
+        except Exception:
+            pass
+    report["methods"]["grep"] = {
+        "result_count": len(grep_results),
+        "results": sorted(grep_results)[:20],
+    }
+
+    # Method 2: locality index
+    loc_matches = set()
+    if isinstance(locality, dict):
+        for pecs_id in locality:
+            text = pecs_id.lower()
+            if any(t in text for t in query_terms):
+                loc_matches.add(pecs_id)
+    report["methods"]["locality_index"] = {
+        "result_count": len(loc_matches),
+        "results": sorted(loc_matches)[:20],
+    }
+
+    # Method 3: topology edges
+    topo_matches = set()
+    if isinstance(topology, dict):
+        for edge in topology.get("edges", []):
+            text = (str(edge.get("from", "")) + " " + str(edge.get("to", ""))).lower()
+            if any(t in text for t in query_terms):
+                topo_matches.add(edge.get("from", ""))
+                topo_matches.add(edge.get("to", ""))
+    report["methods"]["topology"] = {
+        "result_count": len(topo_matches),
+        "results": sorted(topo_matches)[:20],
+    }
+
+    # Differences: entities found by grep but not by PECS methods
+    grep_only = grep_results - set(
+        m.replace("PECS_ID:", "").replace(".", "/") + ".py"
+        for m in loc_matches | topo_matches
+    )
+    report["differences"] = [
+        f"grep found but PECS missed: {f}"
+        for f in sorted(grep_only)[:20]
+    ]
+
+    if args.json:
+        report["timestamp"] = datetime.datetime.utcnow().isoformat() + "Z"
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"\n=== Query Comparison ===")
+        print(f"Query: {query}")
+        print(f"\nGrep search: {report['methods']['grep']['result_count']} results")
+        print(f"Locality index: {report['methods']['locality_index']['result_count']} results")
+        print(f"Topology: {report['methods']['topology']['result_count']} results")
+        if report["differences"]:
+            print(f"\nDifferences ({len(report['differences'])}):")
+            for d in report["differences"][:10]:
+                print(f"  - {d}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="PECS workspace management CLI")
     parser.add_argument(
@@ -2060,6 +2722,154 @@ def main() -> None:
     )
     doctor_parser.set_defaults(func=_cmd_doctor)
 
+    # ── daemon subcommand group ──────────────────────────────────────────
+
+    daemon_parser = subparsers.add_parser(
+        "daemon",
+        help="Manage the PECS daemon (start/stop/restart/status)",
+    )
+    daemon_sub = daemon_parser.add_subparsers(dest="daemon_command", required=True)
+
+    daemon_start = daemon_sub.add_parser("start", help="Start the PECS daemon")
+    daemon_start.add_argument("workspace_root", help="Target workspace root path")
+    daemon_start.set_defaults(func=_cmd_daemon_start)
+
+    daemon_stop = daemon_sub.add_parser("stop", help="Stop the PECS daemon")
+    daemon_stop.add_argument("workspace_root", help="Target workspace root path")
+    daemon_stop.set_defaults(func=_cmd_daemon_stop)
+
+    daemon_restart = daemon_sub.add_parser("restart", help="Restart the PECS daemon")
+    daemon_restart.add_argument("workspace_root", help="Target workspace root path")
+    daemon_restart.set_defaults(func=_cmd_daemon_restart)
+
+    daemon_status = daemon_sub.add_parser("status", help="Show daemon status")
+    daemon_status.add_argument("workspace_root", help="Target workspace root path")
+    daemon_status.set_defaults(func=_cmd_daemon_status_sub)
+
+    # ── clean ────────────────────────────────────────────────────────────
+
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Remove generated PECS artifacts",
+    )
+    clean_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default=".",
+        help="Target workspace root path (default: current directory)",
+    )
+    clean_parser.add_argument(
+        "--artifacts", action="store_true", default=False,
+        help="Remove generated artifacts (.pecs/*.json) but preserve config and tools",
+    )
+    clean_parser.add_argument(
+        "--runtime", action="store_true", default=False,
+        help="Remove runtime data (locality, topology, daemon state)",
+    )
+    clean_parser.add_argument(
+        "--all", action="store_true", default=False,
+        help="Remove all generated PECS artifacts (equivalent to --artifacts --runtime)",
+    )
+    clean_parser.set_defaults(func=_cmd_clean)
+
+    # ── rebuild ──────────────────────────────────────────────────────────
+
+    rebuild_parser = subparsers.add_parser(
+        "rebuild",
+        help="Deterministic clean rebuild of all PECS artifacts",
+    )
+    rebuild_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default=".",
+        help="Target workspace root path (default: current directory)",
+    )
+    rebuild_parser.add_argument(
+        "--repo-root", default="",
+        help="PECS repository root (default: parent of workspace_bridge_cli.py)",
+    )
+    rebuild_parser.add_argument(
+        "--incremental", action="store_true", default=False,
+        help="Skip full clean; only rebuild stale artifacts",
+    )
+    rebuild_parser.set_defaults(func=_cmd_rebuild)
+
+    # ── validate-artifacts ───────────────────────────────────────────────
+
+    validate_artifacts_parser = subparsers.add_parser(
+        "validate-artifacts",
+        help="Validate individual PECS artifacts for consistency and correctness",
+    )
+    validate_artifacts_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default=".",
+        help="Target workspace root path (default: current directory)",
+    )
+    validate_artifacts_parser.add_argument("--json", action="store_true", default=False,
+        help="Output JSON report")
+    validate_artifacts_parser.set_defaults(func=_cmd_validate_artifacts)
+
+    # ── audit-artifacts ──────────────────────────────────────────────────
+
+    audit_artifacts_parser = subparsers.add_parser(
+        "audit-artifacts",
+        help="Comprehensive audit of PECS artifacts including semantic coverage",
+    )
+    audit_artifacts_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default=".",
+        help="Target workspace root path (default: current directory)",
+    )
+    audit_artifacts_parser.add_argument("--json", action="store_true", default=False,
+        help="Output JSON report")
+    audit_artifacts_parser.add_argument(
+        "--concepts", nargs="*", default=[],
+        help="Specific engineering concepts to check for coverage (default: canonical set)",
+    )
+    audit_artifacts_parser.set_defaults(func=_cmd_audit_artifacts)
+
+    # ── explain-query ────────────────────────────────────────────────────
+
+    explain_parser = subparsers.add_parser(
+        "explain-query",
+        help="Diagnose why PECS returns specific runtime targets for a query",
+    )
+    explain_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default=".",
+        help="Target workspace root path (default: current directory)",
+    )
+    explain_parser.add_argument(
+        "--query", required=True,
+        help="Free-text query to explain",
+    )
+    explain_parser.add_argument("--json", action="store_true", default=False,
+        help="Output JSON report")
+    explain_parser.set_defaults(func=_cmd_explain_query)
+
+    # ── compare-query ────────────────────────────────────────────────────
+
+    compare_parser = subparsers.add_parser(
+        "compare-query",
+        help="Compare PECS projection against text search for a query",
+    )
+    compare_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default=".",
+        help="Target workspace root path (default: current directory)",
+    )
+    compare_parser.add_argument(
+        "--query", required=True,
+        help="Query term to compare across retrieval methods",
+    )
+    compare_parser.add_argument("--json", action="store_true", default=False,
+        help="Output JSON report")
+    compare_parser.set_defaults(func=_cmd_compare_query)
+
     upgrade_parser = subparsers.add_parser(
         "upgrade-workspace",
         help="Run the canonical PECS workspace upgrade pipeline",
@@ -2233,6 +3043,35 @@ def main() -> None:
         help="PECS repository root",
     )
     validate_parser.set_defaults(func=_cmd_validate_workspace)
+
+    consult_parser = subparsers.add_parser(
+        "consult",
+        help="Query PECS for engineering context. Canonical consumer-facing command.",
+    )
+    consult_parser.add_argument(
+        "workspace_root",
+        nargs="?",
+        default=".",
+        help="Target workspace root path (default: current directory)",
+    )
+    consult_parser.add_argument("--query", default="", help="Free-text query for PECS")
+    consult_parser.add_argument(
+        "--source", default="consumer",
+        help="Consumer identity: continue, copilot, kimi, commandcode (default: consumer)",
+    )
+    consult_parser.add_argument("--profile", default="medium", choices=["small", "medium", "large"])
+    consult_parser.add_argument("--model-name", default="", help="Model identity")
+    consult_parser.add_argument("--model-source", default="", help="Model source/provider")
+    consult_parser.add_argument("--model-size", default="medium", choices=["small", "medium", "large"])
+    consult_parser.add_argument("--provider", default="")
+    consult_parser.add_argument("--context-window", type=int, default=32768)
+    consult_parser.add_argument("--local-vs-frontier", default="unknown", choices=["local", "frontier", "unknown"])
+    consult_parser.add_argument("--reasoning-capability-class", default="unknown", choices=["small", "medium", "frontier", "unknown"])
+    consult_parser.add_argument(
+        "--output", default="",
+        help="Write JSON result to this file instead of stdout",
+    )
+    consult_parser.set_defaults(func=_cmd_consult)
 
     query_pipeline_parser = subparsers.add_parser(
         "query-pipeline",

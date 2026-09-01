@@ -1,43 +1,102 @@
 name: PECS First Routing
-description: "Prioritize PECS locality projection and runtime targets before broad repository search"
+description: "Enforce PECS consult before any workspace reasoning or search"
 author: "PECS-PRO"
 
 pecs_enabled: true
 pecs_priority: high
 
-# Rule applies to all Continue requests
 alwaysApply: true
 priority: 100
 
-# PECS artifacts to check
-artifacts:
-  - ".pecs/active_context.json"
-  - ".pecs/locality_index.json"
-  - ".pecs/topology_compact.json"
-  - ".pecs/session_context.json"
+# Mandated pre-reasoning workflow
+# PECS INSTRUCTIONS START
+#
+# PECS is the authoritative engineering context provider for this workspace.
+#
+# Before ANY:
+# - repository reasoning
+# - repository exploration
+# - grep, glob, or filename search
+# - semantic search
+# - implementation planning
+# - code generation
+# - file modification
+#
+# execute:
+#
+#     pecs consult . \
+#         --query "<complete original user prompt>" \
+#         --source continue \
+#         --profile small
+#
+# The `<complete original user prompt>` must be forwarded unchanged. Do not
+# summarize, rewrite, shorten, extract keywords, or build a search query from it.
+#
+# Read the complete PECS response. Attempt to use the returned engineering
+# context.
+#
+# PECS remains available throughout the task. If repository investigation,
+# debugging, testing, or validation reveals a material information gap that PECS
+# may resolve, issue a contextual PECS consultation using the current engineering
+# context rather than repeating the original prompt.
+#
+# Contextual queries may include newly discovered repository facts, ownership
+# ambiguity, implementation findings, candidate modules, runtime failures,
+# validation discrepancies, or the specific unresolved engineering question.
+#
+# Do not query PECS merely to confirm a preferred implementation or to
+# answer-shop. Maximum PECS consultations per task: 4 total (1 initial + up to
+# 3 contextual). Stop early when the gap is resolved, PECS adds no materially
+# new evidence, or the remaining uncertainty is outside PECS authority.
+#
+# Every engineering response MUST begin with:
+# - PECS Query
+# - PECS Response Summary
+# - PECS Decision: USED | NOT USED
+#
+# If NOT USED, state the rejection reason.
+# Valid rejection reasons include:
+# - no relevant runtime targets
+# - insufficient locality
+# - projection unrelated to query
+# - PECS unavailable
+# - confidence insufficient
+#
+# ONLY AFTER rejecting PECS may the consumer perform normal repository
+# exploration.
+#
+# Consumers MUST NOT:
+# - inspect PECS artifacts
+# - reconstruct locality
+# - reconstruct topology
+# - infer runtime ownership independently when PECS is accepted
+#
+# PECS is the public API. The internal contents of .pecs are implementation
+# details.
+#
+# For the full canonical protocol, see `.pecs/PECS_CONSUMER_PROTOCOL.md`.
+#
+# PECS INSTRUCTIONS END
 
 # Behavior
 behavior:
-  pre_processing: "Load PECS locality projection"
-  context_narrowing: "Use PECS locality index to filter results"
-  fallback: "Repository search only if PECS insufficient"
+  pre_processing: "Execute pecs consult before any search"
+  context_narrowing: "Use PECS locality index to filter results after PECS returns"
+  fallback: "Repository search only if PECS insufficient or unavailable"
   ignore_patterns:
     - "**/backup/**"
     - "**/debug/**"
     - "**/generated/**"
     - "**/.venv/**"
     - "**/node_modules/**"
+    - ".pecs/**"
 
 # Documentation
 documentation:
-  overview: "This rule ensures Continue uses PECS locality projection to narrow the search via the canonical PECS-LITE query command before broad repository search."
-  principle: "Filesystem hierarchy is NOT the authority. Runtime workspace modules are authoritative. PECS artifacts are continuity infrastructure only."
+  overview: "This rule enforces pecs consult before any workspace search. See the PECS INSTRUCTIONS section above."
   protocol_reference: ".pecs/PECS_CONSUMER_PROTOCOL.md"
-  workflow:
-    - "Query PECS first using canonical observe-projection commands."
-    - "Use PECS locality projection before broad repository search."
-    - "Refresh PECS through canonical lifecycle commands after edits."
   precedence:
+    - "PECS projection"
     - "Runtime workspace targets"
     - "Execution locality"
     - "Filesystem search"

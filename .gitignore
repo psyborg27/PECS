@@ -47,6 +47,11 @@ htmlcov/
 .vscode/
 .idea/
 
+# Canonical workspace asset templates are source resources, not local IDE state.
+!workspace_assets/.vscode/
+!workspace_assets/.vscode/tasks.json
+!workspace_assets/.vscode/settings.json
+
 # -----------------------------------------------------------------------------
 # PECS Generated Runtime State
 # -----------------------------------------------------------------------------

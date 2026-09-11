@@ -420,6 +420,16 @@ def _sanitize_vscode_task(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
+def _windows_task(command: str, args: Optional[List[str]] = None) -> Dict[str, Any]:
+    task: Dict[str, Any] = {
+        "command": command,
+        "options": {"cwd": "${workspaceFolder}"},
+    }
+    if args:
+        task["args"] = args
+    return task
+
+
 def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
     base = _read_json(tasks_path, {"version": "2.0.0", "tasks": [], "inputs": []})
     tasks: List[Dict[str, Any]] = (
@@ -633,6 +643,102 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
         emitted_envelope_log_task,
         projection_snapshot_log_task,
     ]
+
+    windows_tasks = {
+        "PECS: Start Daemon": _windows_task(
+            ".\\pecs\\run_pecs_daemon.cmd", ["${workspaceFolder}"]
+        ),
+        "PECS: Auto Start Daemon On Folder Open": _windows_task(
+            ".\\pecs\\run_pecs_daemon.cmd", ["${workspaceFolder}"]
+        ),
+        "PECS: Stop Daemon": _windows_task(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-Command",
+                "if (Test-Path '.pecs/daemon.pid') { $daemonPid = (Get-Content '.pecs/daemon.pid' | Select-Object -First 1).Trim(); if ($daemonPid -match '^[0-9]+$') { Stop-Process -Id $daemonPid -ErrorAction SilentlyContinue } }",
+            ],
+        ),
+        "PECS: Append Chat Event": _windows_task(
+            ".\\pecs\\tools\\append_ai_chat_history.cmd",
+            ["${workspaceFolder}", "${input:pecsChatSource}", "${input:pecsChatMessage}"],
+        ),
+        "PECS: Manual Update Chat History": _windows_task(
+            ".\\pecs\\tools\\update_ai_chat_history.cmd",
+            ["${workspaceFolder}", "${input:pecsChatSource}", "${input:pecsChatMessage}"],
+        ),
+        "PECS: Refresh Continuity State": _windows_task(
+            ".\\pecs\\bridge\\run_bridge.cmd", ["${workspaceFolder}", "refresh"]
+        ),
+        "PECS: Validate Continuity State": _windows_task(
+            ".\\pecs\\bridge\\run_bridge.cmd", ["${workspaceFolder}", "validate"]
+        ),
+        "PECS: Observation Snapshot (Opt-In)": _windows_task(
+            ".\\pecs\\run_pecs.cmd",
+            [
+                "observe-projection-snapshot",
+                "${workspaceFolder}",
+                "--query",
+                "${input:pecsObservationQuery}",
+                "--query-source",
+                "${input:pecsChatSource}",
+                "--model-name",
+                "${input:pecsObservationModelName}",
+                "--profile-class",
+                "${input:pecsObservationProfileClass}",
+                "--local-vs-frontier",
+                "${input:pecsObservationLocalVsFrontier}",
+            ],
+        ),
+        "PECS: Observation Daemon (Opt-In)": _windows_task(
+            ".\\pecs\\run_pecs.cmd",
+            [
+                "observe-projection-daemon",
+                "${workspaceFolder}",
+                "--query",
+                "${input:pecsObservationQuery}",
+                "--query-source",
+                "${input:pecsChatSource}",
+                "--model-name",
+                "${input:pecsObservationModelName}",
+                "--profile-class",
+                "${input:pecsObservationProfileClass}",
+                "--local-vs-frontier",
+                "${input:pecsObservationLocalVsFrontier}",
+                "--iterations",
+                "${input:pecsObservationIterations}",
+                "--interval-seconds",
+                "${input:pecsObservationIntervalSeconds}",
+            ],
+        ),
+        "PECS: Stop Observation Daemon (Opt-In)": _windows_task(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'observe-projection-daemon' -and $_.CommandLine -match [regex]::Escape((Get-Location).Path) } | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }",
+            ],
+        ),
+        "PECS: Show Emitted Envelope Log (Opt-In)": _windows_task(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-Command",
+                "if (Test-Path '.pecs/logs/observation/emitted_envelope.jsonl') { Get-Content '.pecs/logs/observation/emitted_envelope.jsonl' -Tail 120 } else { Write-Output 'No emitted envelope log found.' }",
+            ],
+        ),
+        "PECS: Show Projection Snapshot Log (Opt-In)": _windows_task(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-Command",
+                "if (Test-Path '.pecs/logs/observation/projection_snapshot.jsonl') { Get-Content '.pecs/logs/observation/projection_snapshot.jsonl' -Tail 120 } else { Write-Output 'No projection snapshot log found.' }",
+            ],
+        ),
+    }
+    for task in desired_tasks:
+        if task.get("label") in windows_tasks:
+            task["windows"] = windows_tasks[task["label"]]
 
     existing_by_label = {
         task.get("label"): task

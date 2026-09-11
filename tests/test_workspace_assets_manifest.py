@@ -4,11 +4,77 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import install_workspace_integration
 from pecs_pro.install_workspace_integration import install_workspace
 from pecs_pro.workspace_assets_manager import WorkspaceAssetsManager
 
 
 class WorkspaceAssetsManifestTests(unittest.TestCase):
+    def test_windows_task_definitions_are_powershell_51_safe_and_space_safe(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        template_path = repo_root / "workspace_assets" / ".vscode" / "tasks.json"
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory(prefix="pecs workspace ") as tmpdir:
+            tasks_path = Path(tmpdir) / ".vscode" / "tasks.json"
+            install_workspace_integration._merge_tasks(tasks_path, repo_root)
+            generated = json.loads(tasks_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(generated["version"], "2.0.0")
+        self.assertIsInstance(generated["tasks"], list)
+        template_by_label = {task["label"]: task for task in template["tasks"]}
+        generated_by_label = {task["label"]: task for task in generated["tasks"]}
+
+        for label, task in generated_by_label.items():
+            windows = task.get("windows", {})
+            self.assertNotIn("&&", json.dumps(windows))
+            self.assertEqual(windows.get("options", {}).get("cwd"), "${workspaceFolder}")
+            if label in template_by_label:
+                self.assertTrue(task["command"].startswith("bash -lc 'cd \"${workspaceFolder}\""))
+
+        for label in (
+            "PECS: Start Daemon",
+            "PECS: Auto Start Daemon On Folder Open",
+            "PECS: Append Chat Event",
+            "PECS: Manual Update Chat History",
+            "PECS: Refresh Continuity State",
+            "PECS: Validate Continuity State",
+            "PECS: Observation Snapshot (Opt-In)",
+            "PECS: Observation Daemon (Opt-In)",
+        ):
+            windows = generated_by_label[label]["windows"]
+            self.assertIn("${workspaceFolder}", windows["args"])
+            self.assertTrue(windows["command"].endswith(".cmd"))
+
+        for label in (
+            "PECS: Stop Daemon",
+            "PECS: Show Emitted Envelope Log (Opt-In)",
+            "PECS: Show Projection Snapshot Log (Opt-In)",
+        ):
+            windows = generated_by_label[label]["windows"]
+            self.assertEqual(windows["command"], "powershell.exe")
+            self.assertIn("-Command", windows["args"])
+
+    def test_unix_task_commands_remain_identical_to_canonical_template(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        template = json.loads(
+            (repo_root / "workspace_assets" / ".vscode" / "tasks.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tasks_path = Path(tmpdir) / ".vscode" / "tasks.json"
+            install_workspace_integration._merge_tasks(tasks_path, repo_root)
+            generated = json.loads(tasks_path.read_text(encoding="utf-8"))
+
+        template_labels = {task["label"] for task in template["tasks"]}
+        for task in generated["tasks"]:
+            if task["label"] in template_labels:
+                self.assertTrue(task["command"].startswith("bash -lc 'cd \"${workspaceFolder}\""))
+
+        for task in template["tasks"]:
+            self.assertTrue(task["command"].startswith("bash -lc 'cd \"${workspaceFolder}\""))
+
     def test_install_workspace_creates_windows_daemon_launcher_for_fresh_workspace(self):
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="pecs workspace ") as tmpdir:

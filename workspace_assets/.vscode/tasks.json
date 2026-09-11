@@ -6,7 +6,13 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs_daemon.sh \"${workspaceFolder}\"'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs_daemon.cmd \"${workspaceFolder}\""
+        "command": ".\\pecs\\run_pecs_daemon.cmd",
+        "args": [
+          "${workspaceFolder}"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       },
       "isBackground": true,
       "problemMatcher": []
@@ -16,7 +22,13 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs_daemon.sh \"${workspaceFolder}\"'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs_daemon.cmd \"${workspaceFolder}\""
+        "command": ".\\pecs\\run_pecs_daemon.cmd",
+        "args": [
+          "${workspaceFolder}"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       },
       "isBackground": true,
       "problemMatcher": [],
@@ -29,7 +41,15 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && if [[ -f .pecs/daemon.pid ]]; then pid=$(<.pecs/daemon.pid); pid=\"${pid//\"/}\"; pid=\"${pid//'/}\"; pid=\"${pid//$'\\r'/}\"; pid=\"${pid//$'\\n'/}\"; pid=\"${pid//[[:space:]]/}\"; if [[ \"$pid\" =~ ^[0-9]+$ ]] && kill -0 \"$pid\" 2>/dev/null; then kill \"$pid\"; fi; fi'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && powershell.exe -NoProfile -Command \"if (Test-Path '.pecs/daemon.pid') { $pid = Get-Content '.pecs/daemon.pid' | Select-Object -First 1; $pid = $pid.Trim().Trim(\"\").Trim(''); if ($pid -match '^[0-9]+$') { Stop-Process -Id $pid -ErrorAction SilentlyContinue } }\""
+        "command": "powershell.exe",
+        "args": [
+          "-NoProfile",
+          "-Command",
+          "if (Test-Path '.pecs/daemon.pid') { $daemonPid = (Get-Content '.pecs/daemon.pid' | Select-Object -First 1).Trim(); if ($daemonPid -match '^[0-9]+$') { Stop-Process -Id $daemonPid -ErrorAction SilentlyContinue } }"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     },
     {
@@ -37,7 +57,15 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/tools/append_ai_chat_history.sh \"${workspaceFolder}\" --source \"${input:pecsChatSource}\" --message \"${input:pecsChatMessage}\"'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\tools\\append_ai_chat_history.cmd \"${workspaceFolder}\" \"${input:pecsChatSource}\" \"${input:pecsChatMessage}\""
+        "command": ".\\pecs\\tools\\append_ai_chat_history.cmd",
+        "args": [
+          "${workspaceFolder}",
+          "${input:pecsChatSource}",
+          "${input:pecsChatMessage}"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     },
     {
@@ -45,7 +73,15 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/tools/update_ai_chat_history.sh \"${workspaceFolder}\" \"${input:pecsChatSource}\" \"${input:pecsChatMessage}\"'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\tools\\update_ai_chat_history.cmd \"${workspaceFolder}\" \"${input:pecsChatSource}\" \"${input:pecsChatMessage}\""
+        "command": ".\\pecs\\tools\\update_ai_chat_history.cmd",
+        "args": [
+          "${workspaceFolder}",
+          "${input:pecsChatSource}",
+          "${input:pecsChatMessage}"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     },
     {
@@ -53,7 +89,14 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/bridge/run_bridge.sh \"${workspaceFolder}\" refresh'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\bridge\\run_bridge.cmd \"${workspaceFolder}\" refresh"
+        "command": ".\\pecs\\bridge\\run_bridge.cmd",
+        "args": [
+          "${workspaceFolder}",
+          "refresh"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     },
     {
@@ -61,7 +104,14 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/bridge/run_bridge.sh \"${workspaceFolder}\" validate'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\bridge\\run_bridge.cmd \"${workspaceFolder}\" validate"
+        "command": ".\\pecs\\bridge\\run_bridge.cmd",
+        "args": [
+          "${workspaceFolder}",
+          "validate"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     },
     {
@@ -69,7 +119,18 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs.sh observe-projection-snapshot \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\"'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs.cmd observe-projection-snapshot \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\""
+        "command": ".\\pecs\\run_pecs.cmd",
+        "args": [
+          "observe-projection-snapshot",
+          "${workspaceFolder}",
+          "--query",
+          "${input:pecsObservationQuery}",
+          "--query-source",
+          "${input:pecsChatSource}"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     },
     {
@@ -77,7 +138,22 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs.sh observe-projection-daemon \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\" --iterations \"${input:pecsObservationIterations}\" --interval-seconds \"${input:pecsObservationIntervalSeconds}\"'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs.cmd observe-projection-daemon \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\" --iterations \"${input:pecsObservationIterations}\" --interval-seconds \"${input:pecsObservationIntervalSeconds}\""
+        "command": ".\\pecs\\run_pecs.cmd",
+        "args": [
+          "observe-projection-daemon",
+          "${workspaceFolder}",
+          "--query",
+          "${input:pecsObservationQuery}",
+          "--query-source",
+          "${input:pecsChatSource}",
+          "--iterations",
+          "${input:pecsObservationIterations}",
+          "--interval-seconds",
+          "${input:pecsObservationIntervalSeconds}"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       },
       "isBackground": true
     },
@@ -86,7 +162,15 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && if [[ -f .pecs/logs/observation/emitted_envelope.jsonl ]]; then tail -n 120 .pecs/logs/observation/emitted_envelope.jsonl; else echo \"No emitted envelope log found.\"; fi'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && powershell.exe -NoProfile -Command \"if (Test-Path '.pecs/logs/observation/emitted_envelope.jsonl') { Get-Content '.pecs/logs/observation/emitted_envelope.jsonl' -Tail 120 } else { Write-Output 'No emitted envelope log found.' }\""
+        "command": "powershell.exe",
+        "args": [
+          "-NoProfile",
+          "-Command",
+          "if (Test-Path '.pecs/logs/observation/emitted_envelope.jsonl') { Get-Content '.pecs/logs/observation/emitted_envelope.jsonl' -Tail 120 } else { Write-Output 'No emitted envelope log found.' }"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     },
     {
@@ -94,7 +178,15 @@
       "type": "shell",
       "command": "bash -lc 'cd \"${workspaceFolder}\" && if [[ -f .pecs/logs/observation/projection_snapshot.jsonl ]]; then tail -n 120 .pecs/logs/observation/projection_snapshot.jsonl; else echo \"No projection snapshot log found.\"; fi'",
       "windows": {
-        "command": "cd \"${workspaceFolder}\" && powershell.exe -NoProfile -Command \"if (Test-Path '.pecs/logs/observation/projection_snapshot.jsonl') { Get-Content '.pecs/logs/observation/projection_snapshot.jsonl' -Tail 120 } else { Write-Output 'No projection snapshot log found.' }\""
+        "command": "powershell.exe",
+        "args": [
+          "-NoProfile",
+          "-Command",
+          "if (Test-Path '.pecs/logs/observation/projection_snapshot.jsonl') { Get-Content '.pecs/logs/observation/projection_snapshot.jsonl' -Tail 120 } else { Write-Output 'No projection snapshot log found.' }"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder}"
+        }
       }
     }
   ],

@@ -1817,8 +1817,9 @@ def install_workspace(workspace_root: Path, repo_root: Path, preserve_existing: 
         _install_workspace_local_launchers(workspace_root, repo_root)
     else:
         logger.info(
-            "Manifest-based workspace assets manager is available; skipping legacy managed asset deployment"
+            "Manifest-based workspace assets manager is available; ensuring local launchers are present"
         )
+        _install_workspace_local_launchers(workspace_root, repo_root)
 
     _cleanup_stale_local_runtime_copy(workspace_root)
     _write_workspace_install_root(workspace_root, repo_root)

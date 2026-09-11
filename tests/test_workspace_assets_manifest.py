@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,63 @@ from pecs_pro.workspace_assets_manager import WorkspaceAssetsManager
 
 
 class WorkspaceAssetsManifestTests(unittest.TestCase):
+    def test_install_workspace_creates_windows_daemon_launcher_for_fresh_workspace(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="pecs workspace ") as tmpdir:
+            workspace_root = Path(tmpdir) / "target workspace"
+            workspace_root.mkdir()
+
+            install_workspace(workspace_root, repo_root, preserve_existing=True)
+
+            pecs_dir = workspace_root / ".pecs"
+            self.assertTrue(pecs_dir.is_dir())
+            for launcher_name in (
+                "run_pecs_daemon.cmd",
+                "run_pecs_daemon.ps1",
+                "run_pecs_daemon.sh",
+            ):
+                self.assertTrue((pecs_dir / launcher_name).is_file())
+
+            cmd_contents = (pecs_dir / "run_pecs_daemon.cmd").read_text(encoding="utf-8")
+            self.assertIn("run_pecs_daemon.ps1", cmd_contents)
+            self.assertTrue((pecs_dir / "config" / "install_root.json").is_file())
+
+    def test_install_workspace_preserves_windows_daemon_launcher_on_initialized_workspace(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="pecs workspace ") as tmpdir:
+            workspace_root = Path(tmpdir) / "target workspace"
+            workspace_root.mkdir()
+
+            install_workspace(workspace_root, repo_root, preserve_existing=True)
+            launcher = workspace_root / ".pecs" / "run_pecs_daemon.cmd"
+            before = hashlib.sha256(launcher.read_bytes()).hexdigest()
+
+            install_workspace(workspace_root, repo_root, preserve_existing=True)
+
+            self.assertTrue(launcher.is_file())
+            self.assertEqual(before, hashlib.sha256(launcher.read_bytes()).hexdigest())
+
+    def test_manifest_declares_all_platform_daemon_launchers(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        manager = WorkspaceAssetsManager(repo_root, repo_root)
+        daemon_assets = {
+            asset["target"]: asset
+            for asset in manager.manifest.get("assets", [])
+            if str(asset.get("target", "")).startswith(".pecs/run_pecs_daemon.")
+        }
+
+        self.assertEqual(
+            set(daemon_assets),
+            {
+                ".pecs/run_pecs_daemon.cmd",
+                ".pecs/run_pecs_daemon.ps1",
+                ".pecs/run_pecs_daemon.sh",
+            },
+        )
+        for target, asset in daemon_assets.items():
+            self.assertTrue(asset["required"])
+            self.assertTrue((repo_root / "workspace_assets" / asset["source"]).is_file())
+
     def test_manifest_sources_exist(self):
         repo_root = Path(__file__).resolve().parents[1]
         manager = WorkspaceAssetsManager(repo_root, repo_root)

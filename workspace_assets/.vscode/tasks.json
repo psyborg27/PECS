@@ -1,0 +1,133 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "PECS: Start Daemon",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs_daemon.sh \"${workspaceFolder}\"'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs_daemon.cmd \"${workspaceFolder}\""
+      },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "PECS: Auto Start Daemon On Folder Open",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs_daemon.sh \"${workspaceFolder}\"'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs_daemon.cmd \"${workspaceFolder}\""
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "runOptions": {
+        "runOn": "folderOpen"
+      }
+    },
+    {
+      "label": "PECS: Stop Daemon",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && if [[ -f .pecs/daemon.pid ]]; then pid=$(<.pecs/daemon.pid); pid=\"${pid//\"/}\"; pid=\"${pid//'/}\"; pid=\"${pid//$'\\r'/}\"; pid=\"${pid//$'\\n'/}\"; pid=\"${pid//[[:space:]]/}\"; if [[ \"$pid\" =~ ^[0-9]+$ ]] && kill -0 \"$pid\" 2>/dev/null; then kill \"$pid\"; fi; fi'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && powershell.exe -NoProfile -Command \"if (Test-Path '.pecs/daemon.pid') { $pid = Get-Content '.pecs/daemon.pid' | Select-Object -First 1; $pid = $pid.Trim().Trim(\"\").Trim(''); if ($pid -match '^[0-9]+$') { Stop-Process -Id $pid -ErrorAction SilentlyContinue } }\""
+      }
+    },
+    {
+      "label": "PECS: Append Chat Event",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/tools/append_ai_chat_history.sh \"${workspaceFolder}\" --source \"${input:pecsChatSource}\" --message \"${input:pecsChatMessage}\"'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\tools\\append_ai_chat_history.cmd \"${workspaceFolder}\" \"${input:pecsChatSource}\" \"${input:pecsChatMessage}\""
+      }
+    },
+    {
+      "label": "PECS: Manual Update Chat History",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/tools/update_ai_chat_history.sh \"${workspaceFolder}\" \"${input:pecsChatSource}\" \"${input:pecsChatMessage}\"'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\tools\\update_ai_chat_history.cmd \"${workspaceFolder}\" \"${input:pecsChatSource}\" \"${input:pecsChatMessage}\""
+      }
+    },
+    {
+      "label": "PECS: Refresh Continuity State",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/bridge/run_bridge.sh \"${workspaceFolder}\" refresh'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\bridge\\run_bridge.cmd \"${workspaceFolder}\" refresh"
+      }
+    },
+    {
+      "label": "PECS: Validate Continuity State",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/bridge/run_bridge.sh \"${workspaceFolder}\" validate'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\bridge\\run_bridge.cmd \"${workspaceFolder}\" validate"
+      }
+    },
+    {
+      "label": "PECS: Observation Snapshot (Opt-In)",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs.sh observe-projection-snapshot \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\"'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs.cmd observe-projection-snapshot \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\""
+      }
+    },
+    {
+      "label": "PECS: Observation Daemon (Opt-In)",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && bash .pecs/run_pecs.sh observe-projection-daemon \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\" --iterations \"${input:pecsObservationIterations}\" --interval-seconds \"${input:pecsObservationIntervalSeconds}\"'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs.cmd observe-projection-daemon \"${workspaceFolder}\" --query \"${input:pecsObservationQuery}\" --query-source \"${input:pecsChatSource}\" --iterations \"${input:pecsObservationIterations}\" --interval-seconds \"${input:pecsObservationIntervalSeconds}\""
+      },
+      "isBackground": true
+    },
+    {
+      "label": "PECS: Show Emitted Envelope Log (Opt-In)",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && if [[ -f .pecs/logs/observation/emitted_envelope.jsonl ]]; then tail -n 120 .pecs/logs/observation/emitted_envelope.jsonl; else echo \"No emitted envelope log found.\"; fi'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && powershell.exe -NoProfile -Command \"if (Test-Path '.pecs/logs/observation/emitted_envelope.jsonl') { Get-Content '.pecs/logs/observation/emitted_envelope.jsonl' -Tail 120 } else { Write-Output 'No emitted envelope log found.' }\""
+      }
+    },
+    {
+      "label": "PECS: Show Projection Snapshot Log (Opt-In)",
+      "type": "shell",
+      "command": "bash -lc 'cd \"${workspaceFolder}\" && if [[ -f .pecs/logs/observation/projection_snapshot.jsonl ]]; then tail -n 120 .pecs/logs/observation/projection_snapshot.jsonl; else echo \"No projection snapshot log found.\"; fi'",
+      "windows": {
+        "command": "cd \"${workspaceFolder}\" && powershell.exe -NoProfile -Command \"if (Test-Path '.pecs/logs/observation/projection_snapshot.jsonl') { Get-Content '.pecs/logs/observation/projection_snapshot.jsonl' -Tail 120 } else { Write-Output 'No projection snapshot log found.' }\""
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "pecsChatSource",
+      "type": "promptString",
+      "description": "Chat source (copilot or continue)",
+      "default": "copilot"
+    },
+    {
+      "id": "pecsChatMessage",
+      "type": "promptString",
+      "description": "Message/event text",
+      "default": "manual append"
+    },
+    {
+      "id": "pecsObservationQuery",
+      "type": "promptString",
+      "description": "Observation query text",
+      "default": "runtime locality reconciliation"
+    },
+    {
+      "id": "pecsObservationIterations",
+      "type": "promptString",
+      "description": "Bounded observation iterations",
+      "default": "20"
+    },
+    {
+      "id": "pecsObservationIntervalSeconds",
+      "type": "promptString",
+      "description": "Seconds between observation snapshots",
+      "default": "2.0"
+    }
+  ]
+}

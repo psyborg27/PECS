@@ -614,11 +614,9 @@ class WorkspaceAssetsManager:
 
             label = str(task["label"])
             if label in existing_by_label:
-                existing_task = existing_by_label[label]
-                merged_task = dict(existing_task)
-                for key, value in task.items():
-                    if key not in merged_task:
-                        merged_task[key] = value
+                # PECS-owned labels are canonical; preserve unrelated tasks while
+                # replacing stale definitions for the same managed label.
+                merged_task = dict(task)
                 for index, element in enumerate(merged_tasks):
                     if isinstance(element, dict) and element.get("label") == label:
                         merged_tasks[index] = merged_task

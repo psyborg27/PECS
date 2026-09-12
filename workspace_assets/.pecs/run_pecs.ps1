@@ -3,7 +3,7 @@ $InstallRoot = $null
 $InstallPython = $null
 $PecsExe = $null
 $PecsDaemonExe = $null
-$ConfigFile = Join-Path $ScriptDir "config" "install_root.json"
+$ConfigFile = Join-Path $ScriptDir (Join-Path "config" "install_root.json")
 if (Test-Path $ConfigFile) {
   $data = Get-Content $ConfigFile -Raw | ConvertFrom-Json
   $InstallRoot = $data.install_root

@@ -10,6 +10,113 @@ from pecs_pro.workspace_assets_manager import WorkspaceAssetsManager
 
 
 class WorkspaceAssetsManifestTests(unittest.TestCase):
+    def test_canonical_windows_tasks_use_installed_pecs_paths(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        tasks = json.loads(
+            (repo_root / "workspace_assets" / ".vscode" / "tasks.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        for task in tasks["tasks"]:
+            windows = task["windows"]
+            serialized = json.dumps(windows)
+            self.assertNotIn("&&", serialized)
+            self.assertNotIn(".\\pecs\\", serialized)
+            self.assertEqual(windows["options"]["cwd"], "${workspaceFolder}")
+
+        launcher_commands = {
+            task["windows"]["command"]
+            for task in tasks["tasks"]
+            if task["label"]
+            in {
+                "PECS: Start Daemon",
+                "PECS: Auto Start Daemon On Folder Open",
+                "PECS: Append Chat Event",
+                "PECS: Manual Update Chat History",
+                "PECS: Refresh Continuity State",
+                "PECS: Validate Continuity State",
+                "PECS: Observation Snapshot (Opt-In)",
+                "PECS: Observation Daemon (Opt-In)",
+            }
+        }
+        self.assertTrue(all(command.startswith(".\\.pecs\\") for command in launcher_commands))
+
+    def test_windows_launcher_templates_use_powershell_51_join_path_form(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for launcher_name in ("run_pecs.ps1", "run_pecs_daemon.ps1"):
+            content = (
+                repo_root / "workspace_assets" / ".pecs" / launcher_name
+            ).read_text(encoding="utf-8")
+            self.assertIn(
+                '$ConfigFile = Join-Path $ScriptDir (Join-Path "config" "install_root.json")',
+                content,
+            )
+            self.assertNotIn(
+                '$ConfigFile = Join-Path $ScriptDir "config" "install_root.json"',
+                content,
+            )
+
+    def test_fresh_install_deploys_corrected_tasks_and_launcher(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="pecs workspace ") as tmpdir:
+            workspace_root = Path(tmpdir) / "fresh workspace"
+            workspace_root.mkdir()
+
+            manager = WorkspaceAssetsManager(repo_root, workspace_root)
+            manager.install_assets(upgrade=True, verify=False)
+            install_workspace(workspace_root, repo_root, preserve_existing=True)
+
+            installed_tasks = json.loads(
+                (workspace_root / ".vscode" / "tasks.json").read_text(encoding="utf-8")
+            )
+            start_task = next(
+                task for task in installed_tasks["tasks"] if task["label"] == "PECS: Start Daemon"
+            )
+            self.assertEqual(start_task["windows"]["command"], ".\\.pecs\\run_pecs_daemon.cmd")
+            self.assertEqual(start_task["windows"]["args"], ["${workspaceFolder}"])
+            self.assertTrue((workspace_root / ".pecs" / "run_pecs_daemon.ps1").is_file())
+
+    def test_upgrade_replaces_stale_pecs_tasks_and_preserves_user_tasks(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="pecs workspace ") as tmpdir:
+            workspace_root = Path(tmpdir) / "existing workspace"
+            tasks_path = workspace_root / ".vscode" / "tasks.json"
+            tasks_path.parent.mkdir(parents=True)
+            tasks_path.write_text(
+                json.dumps(
+                    {
+                        "version": "2.0.0",
+                        "tasks": [
+                            {
+                                "label": "PECS: Start Daemon",
+                                "type": "shell",
+                                "command": "old command",
+                                "windows": {"command": "cd \"${workspaceFolder}\" && .\\pecs\\run_pecs_daemon.cmd"},
+                            },
+                            {"label": "User: Keep Me", "type": "shell", "command": "echo user"},
+                        ],
+                        "inputs": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = WorkspaceAssetsManager(repo_root, workspace_root)
+            manager.install_assets(upgrade=True, verify=False)
+
+            installed = json.loads(tasks_path.read_text(encoding="utf-8"))
+            by_label = {task["label"]: task for task in installed["tasks"]}
+            self.assertEqual(
+                by_label["PECS: Start Daemon"]["windows"]["command"],
+                ".\\.pecs\\run_pecs_daemon.cmd",
+            )
+            self.assertEqual(by_label["User: Keep Me"]["command"], "echo user")
+
+            first_upgrade = tasks_path.read_bytes()
+            manager.install_assets(upgrade=True, verify=False)
+            self.assertEqual(first_upgrade, tasks_path.read_bytes())
+
     def test_windows_task_definitions_are_powershell_51_safe_and_space_safe(self):
         repo_root = Path(__file__).resolve().parents[1]
         template_path = repo_root / "workspace_assets" / ".vscode" / "tasks.json"

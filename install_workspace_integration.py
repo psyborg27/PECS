@@ -646,10 +646,10 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
 
     windows_tasks = {
         "PECS: Start Daemon": _windows_task(
-            ".\\pecs\\run_pecs_daemon.cmd", ["${workspaceFolder}"]
+            ".\\.pecs\\run_pecs_daemon.cmd", ["${workspaceFolder}"]
         ),
         "PECS: Auto Start Daemon On Folder Open": _windows_task(
-            ".\\pecs\\run_pecs_daemon.cmd", ["${workspaceFolder}"]
+            ".\\.pecs\\run_pecs_daemon.cmd", ["${workspaceFolder}"]
         ),
         "PECS: Stop Daemon": _windows_task(
             "powershell.exe",
@@ -660,21 +660,21 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
             ],
         ),
         "PECS: Append Chat Event": _windows_task(
-            ".\\pecs\\tools\\append_ai_chat_history.cmd",
+            ".\\.pecs\\tools\\append_ai_chat_history.cmd",
             ["${workspaceFolder}", "${input:pecsChatSource}", "${input:pecsChatMessage}"],
         ),
         "PECS: Manual Update Chat History": _windows_task(
-            ".\\pecs\\tools\\update_ai_chat_history.cmd",
+            ".\\.pecs\\tools\\update_ai_chat_history.cmd",
             ["${workspaceFolder}", "${input:pecsChatSource}", "${input:pecsChatMessage}"],
         ),
         "PECS: Refresh Continuity State": _windows_task(
-            ".\\pecs\\bridge\\run_bridge.cmd", ["${workspaceFolder}", "refresh"]
+            ".\\.pecs\\bridge\\run_bridge.cmd", ["${workspaceFolder}", "refresh"]
         ),
         "PECS: Validate Continuity State": _windows_task(
-            ".\\pecs\\bridge\\run_bridge.cmd", ["${workspaceFolder}", "validate"]
+            ".\\.pecs\\bridge\\run_bridge.cmd", ["${workspaceFolder}", "validate"]
         ),
         "PECS: Observation Snapshot (Opt-In)": _windows_task(
-            ".\\pecs\\run_pecs.cmd",
+            ".\\.pecs\\run_pecs.cmd",
             [
                 "observe-projection-snapshot",
                 "${workspaceFolder}",
@@ -691,7 +691,7 @@ def _merge_tasks(tasks_path: Path, repo_root: Path) -> None:
             ],
         ),
         "PECS: Observation Daemon (Opt-In)": _windows_task(
-            ".\\pecs\\run_pecs.cmd",
+            ".\\.pecs\\run_pecs.cmd",
             [
                 "observe-projection-daemon",
                 "${workspaceFolder}",
@@ -1612,7 +1612,7 @@ $InstallRoot = $null
 $InstallPython = $null
 $PecsExe = $null
 $PecsDaemonExe = $null
-$ConfigFile = Join-Path $ScriptDir "config" "install_root.json"
+$ConfigFile = Join-Path $ScriptDir (Join-Path "config" "install_root.json")
 if (Test-Path $ConfigFile) {
   $data = Get-Content $ConfigFile -Raw | ConvertFrom-Json
   $InstallRoot = $data.install_root
@@ -1646,7 +1646,7 @@ Set-StrictMode -Version Latest
 $WorkspacePath = Resolve-Path -Path $WorkspaceRoot -ErrorAction Stop
 $WorkspaceRoot = $WorkspacePath.Path
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$ConfigFile = Join-Path $ScriptDir "config" "install_root.json"
+$ConfigFile = Join-Path $ScriptDir (Join-Path "config" "install_root.json")
 $InstallRoot = $null
 $InstallPython = $null
 $PecsDaemonExe = $null

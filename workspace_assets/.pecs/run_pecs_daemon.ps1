@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $WorkspacePath = Resolve-Path -Path $WorkspaceRoot -ErrorAction Stop
 $WorkspaceRoot = $WorkspacePath.Path
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$ConfigFile = Join-Path $ScriptDir "config" "install_root.json"
+$ConfigFile = Join-Path $ScriptDir (Join-Path "config" "install_root.json")
 $InstallRoot = $null
 $InstallPython = $null
 $PecsDaemonExe = $null
